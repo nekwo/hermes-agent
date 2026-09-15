@@ -7,7 +7,7 @@ fire for a deferred turn: the session stays intact and the next message
 retries normally.
 
 AST invariants on ``gateway/run.py`` (mirrors
-``test_35809_auto_reset_clean_context.py``'s load-bearing pin style):
+``test_auto_reset_clean_context.py``'s load-bearing pin style):
 
 * the ``compression_deferred`` branch guards the auto-reset block — a
   deferred result can never reach ``reset_session``;

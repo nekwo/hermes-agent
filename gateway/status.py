@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from hermes_constants import get_hermes_home, get_process_hermes_home
 from typing import Any, Callable, NamedTuple, Optional
 
 from hermes_constants import _get_platform_default_hermes_home, get_hermes_home
@@ -85,11 +86,19 @@ def record_start_and_check_storm(
 
 
 def _get_process_hermes_home() -> Path:
-    """Launch-home HERMES_HOME for identity files (PID, lock, status, markers):
-    ``get_hermes_home()`` honors the per-session ``_HERMES_HOME_OVERRIDE`` and would misroute
-    them."""
-    val = os.environ.get("HERMES_HOME", "").strip()
-    return Path(val) if val else _get_platform_default_hermes_home()
+    """Return the process-level HERMES_HOME, skipping context-local overrides.
+
+    Gateway identity files (PID, lock, runtime status, takeover/stop markers)
+    must always live in the directory the gateway process was launched with.
+    ``get_hermes_home()`` honors ``_HERMES_HOME_OVERRIDE`` contextvar used for
+    per-session profile dispatch, which would route these files into the wrong
+    profile directory when a profile-context task happens to be active at write
+    time.  See issue #56986.  Delegates to the canonical
+    :func:`hermes_constants.get_process_hermes_home` (identical semantics:
+    env var → platform default, never the override) so the process-scope
+    resolution has a single owner.
+    """
+    return get_process_hermes_home()
 
 
 def _canonical_hermes_home(path: Path | str) -> Path:

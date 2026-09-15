@@ -252,6 +252,20 @@ def main():
     # Backgrounded so a dead MCP server can't freeze startup; _make_agent briefly joins it.
     ensure_mcp_discovery_started()
 
+    # Rehydrate durable delegation completions for this process's drain
+    # (server.py's process_registry.drain_notifications watcher) — explicit
+    # at startup, never as an import side effect (same #16856 class as MCP
+    # discovery above; see
+    # docs/agent-runtime-harness/archive/2026-08-22-pre-consolidation/eager-tool-discovery-audit-2026-08-09.md).
+    try:
+        from tools.process_registry import process_registry
+
+        process_registry.restore_durable_completions()
+    except Exception:
+        logger.debug(
+            "Delegation completion restore failed at TUI startup", exc_info=True
+        )
+
     # change_events: clients demote legacy polls; replay_epoch: WS restart detection.
     _write_or_exit({
         "jsonrpc": "2.0", "method": "event",

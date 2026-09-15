@@ -1,0 +1,637 @@
+"""``agent_runtime.serve_registry`` — discovery, and the classification that
+makes it safe to believe.
+
+The registry file is written by a process that may die without cleaning up, so
+the load-bearing behaviour is entirely on the READ side: every entry is proven
+at read time, and every probe that cannot answer lands on ``unknown`` rather
+than on a guess. Guessing "mine" is how a client attaches to a stranger;
+guessing "stale" is how a prune deletes a running service's entry.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from agent_runtime.build_stamp import build_stamp
+from agent_runtime.serve_registry import (
+    CLASSIFICATION_LIVE,
+    CLASSIFICATION_STALE_DEAD_PID,
+    CLASSIFICATION_STALE_RECYCLED_PID,
+    CLASSIFICATION_UNKNOWN,
+    SERVE_REGISTRY_PRUNED_EVENT,
+    ProcessProbe,
+    list_serve_instances,
+    prune_stale_serve_instances,
+    register_serve_instance,
+    serve_instance_path,
+    serve_instances_dir,
+    unregister_serve_instance,
+)
+
+SERVE_CMDLINE = "python -m hermes_cli.main harness serve --ndjson"
+
+
+def _probe(*, alive=True, start_time=1000, cmdline=SERVE_CMDLINE) -> ProcessProbe:
+    return ProcessProbe(
+        alive=lambda pid: alive,
+        start_time=lambda pid: start_time,
+        cmdline=lambda pid: cmdline,
+    )
+
+
+def _register(root, pid=4242, *, probe=None, **kwargs):
+    kwargs.setdefault("argv", list(sys.argv))
+    return register_serve_instance(root, pid=pid, probe=probe or _probe(), **kwargs)
+
+
+def _dead_pid() -> int:
+    """A PID that is provably gone: spawned, waited on, and reaped."""
+
+    process = subprocess.Popen([sys.executable, "-c", "pass"])
+    process.wait(timeout=30)
+    return process.pid
+
+
+def test_registration_writes_the_full_record_under_the_store_root(tmp_path):
+    report = _register(tmp_path, build={"commit": "abc123", "dirty": False})
+
+    assert report.registered is True
+    path = serve_instance_path(tmp_path, 4242)
+    assert path == serve_instances_dir(tmp_path) / "4242.json"
+    record = json.loads(path.read_bytes().decode("utf-8"))
+    assert record["pid"] == 4242
+    assert record["transport"] == "stdio"
+    assert record["boot_id"] == report.boot_id and len(record["boot_id"]) == 32
+    assert record["build"] == {"commit": "abc123", "dirty": False}
+    assert record["started_at"].endswith("Z")
+    # The identity baseline the recycled-pid check compares against later.
+    assert record["started_at_ticks"] == 1000
+    assert record["argv_hint"]
+
+
+def test_the_row_carries_the_code_tree_and_the_rule_that_made_it(tmp_path):
+    """RS-6's row census — the two keys RL-20 reads, on the file it reads them from.
+
+    Registered through the SAME block ``harness serve`` writes
+    (``build_stamp().frame_payload()``, in ``hermes_cli/harness_parts/serve.py``)
+    rather than a hand-built dict, so a key that stopped riding the frame reds
+    here and not only at the stamp's own seam.
+    """
+
+    block = build_stamp().frame_payload()
+    _register(tmp_path, build=block)
+
+    record = json.loads(
+        serve_instance_path(tmp_path, 4242).read_bytes().decode("utf-8")
+    )
+    row_build = record["build"]
+
+    assert "code_tree" in row_build and "code_tree_rule" in row_build
+    assert row_build["code_tree_rule"] == {
+        "prefixes": ["docs/", "tests/", ".github/"],
+        "root_suffixes": [".md"],
+    }
+    # This test process runs from a checkout, so the digest is real. Where it is
+    # not (a Docker image), the row says so in ``code_tree_reason`` and the
+    # launcher falls back to the commit — pinned by
+    # ``tests/agent_runtime/test_build_stamp.py::test_a_non_git_source_writes_no_code_tree_and_the_row_says_why``.
+    if row_build["source"] == "git" and not row_build["code_tree_reason"]:
+        assert isinstance(row_build["code_tree"], str)
+        assert len(row_build["code_tree"]) == 40
+
+
+def test_the_argv_hint_stays_a_hint(tmp_path):
+    """It is read by operators and pasted into reports; other harness lanes
+    carry message text in argv, so the shape never grows past a hint."""
+
+    _register(tmp_path, argv=["C:/py/python.exe", *[f"tok{i}" for i in range(40)]])
+
+    record = json.loads(serve_instance_path(tmp_path, 4242).read_bytes().decode("utf-8"))
+
+    assert record["argv_hint"].startswith("python.exe tok0")
+    assert len(record["argv_hint"]) <= 200
+    assert "tok30" not in record["argv_hint"]
+
+
+def test_a_matching_live_serve_classifies_live(tmp_path):
+    _register(tmp_path)
+
+    rows = list_serve_instances(tmp_path, probe=_probe())
+
+    assert [row["classification"] for row in rows] == [CLASSIFICATION_LIVE]
+    assert rows[0]["classification_reason"] == ""
+    assert rows[0]["pid"] == 4242
+
+
+def test_a_dead_pid_classifies_stale_dead(tmp_path):
+    _register(tmp_path)
+
+    rows = list_serve_instances(tmp_path, probe=_probe(alive=False))
+
+    assert rows[0]["classification"] == CLASSIFICATION_STALE_DEAD_PID
+    assert rows[0]["classification_reason"] == "pid_not_running"
+
+
+def test_a_recycled_pid_is_not_believed(tmp_path):
+    """Alive, but a DIFFERENT process wearing a recycled number. This repo has
+    already SIGTERMed an unrelated desktop process over exactly this."""
+
+    _register(tmp_path, probe=_probe(start_time=1000))
+
+    rows = list_serve_instances(tmp_path, probe=_probe(start_time=7777))
+
+    assert rows[0]["classification"] == CLASSIFICATION_STALE_RECYCLED_PID
+    assert rows[0]["classification_reason"] == "start_time_mismatch"
+
+
+def test_an_unreadable_start_time_is_unknown_not_live(tmp_path):
+    _register(tmp_path)
+
+    rows = list_serve_instances(tmp_path, probe=_probe(start_time=None))
+
+    assert rows[0]["classification"] == CLASSIFICATION_UNKNOWN
+    assert rows[0]["classification_reason"] == "start_time_unreadable"
+
+
+def test_an_unreadable_liveness_probe_is_unknown_not_dead(tmp_path):
+    """The fail-safe direction: a failed probe must never authorise a delete."""
+
+    _register(tmp_path)
+    blind = ProcessProbe(
+        alive=lambda pid: None, start_time=lambda pid: 1000, cmdline=lambda pid: SERVE_CMDLINE
+    )
+
+    rows = list_serve_instances(tmp_path, probe=blind)
+
+    assert rows[0]["classification"] == CLASSIFICATION_UNKNOWN
+    assert rows[0]["classification_reason"] == "liveness_unreadable"
+
+
+def test_a_live_pid_that_is_not_a_serve_is_never_live(tmp_path):
+    _register(tmp_path)
+
+    rows = list_serve_instances(tmp_path, probe=_probe(cmdline="notepad.exe"))
+
+    assert rows[0]["classification"] != CLASSIFICATION_LIVE
+    assert rows[0]["classification_reason"] == "cmdline_not_serve_like"
+
+
+def test_without_an_identity_baseline_a_foreign_cmdline_means_recycled(tmp_path):
+    """With no start-time baseline the command line is the ONLY recycling
+    signal there is, so it has to be decisive rather than merely doubtful."""
+
+    _register(tmp_path, probe=_probe(start_time=None))
+
+    rows = list_serve_instances(tmp_path, probe=_probe(cmdline="firefox.exe"))
+
+    assert rows[0]["classification"] == CLASSIFICATION_STALE_RECYCLED_PID
+
+
+def test_an_unparseable_record_is_reported_not_dropped(tmp_path):
+    serve_instances_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+    (serve_instances_dir(tmp_path) / "99.json").write_bytes(b"{not json")
+
+    rows = list_serve_instances(tmp_path, probe=_probe())
+
+    assert rows[0]["classification"] == CLASSIFICATION_UNKNOWN
+    assert rows[0]["classification_reason"] == "record_unreadable"
+    assert rows[0]["pid"] == 99
+
+
+def test_listing_never_prunes(tmp_path):
+    """An operator debugging "why do I have four serves" must see the wreckage,
+    not a registry that tidied the evidence away before they looked."""
+
+    _register(tmp_path)
+
+    list_serve_instances(tmp_path, probe=_probe(alive=False))
+
+    assert serve_instance_path(tmp_path, 4242).exists()
+
+
+def test_prune_deletes_only_provably_dead_entries_and_says_which(tmp_path):
+    _register(tmp_path, pid=101, probe=_probe(start_time=1))
+    _register(tmp_path, pid=202, probe=_probe(start_time=2))
+    _register(tmp_path, pid=303, probe=_probe(start_time=3))
+
+    def classify(pid):
+        return {101: False, 202: True, 303: True}[pid]
+
+    probe = ProcessProbe(
+        alive=classify,
+        # 303 comes back with a different start time -> recycled, must be KEPT.
+        start_time=lambda pid: {202: 2, 303: 999}.get(pid),
+        cmdline=lambda pid: SERVE_CMDLINE,
+    )
+
+    report = prune_stale_serve_instances(tmp_path, probe=probe)
+
+    assert report["deleted_count"] == 1
+    assert [row["pid"] for row in report["deleted"]] == [101]
+    assert report["deleted"][0]["classification"] == CLASSIFICATION_STALE_DEAD_PID
+    assert sorted(row["pid"] for row in report["kept"]) == [202, 303]
+    assert not serve_instance_path(tmp_path, 101).exists()
+    assert serve_instance_path(tmp_path, 202).exists()
+    assert serve_instance_path(tmp_path, 303).exists()
+
+
+def test_a_prune_that_removes_a_dead_row_says_so_once(tmp_path):
+    """RO-3: the prune was this directory's one silent writer.
+
+    Deleting pid 101's record used to leave nothing on any channel until the
+    aggregate report was assembled — and that report is written only when the
+    count is non-zero, so "who removed the row for pid 43244, and when" was
+    answerable by inference alone (the 2026-09-06 field run).
+
+    *Killing mutation:* drop the ``_emit_pruned_event(..., action="removed")``
+    call and this row goes red on ``len(events) == 1``.
+    """
+
+    _register(tmp_path, pid=101, probe=_probe(start_time=1))
+    events: list[dict] = []
+
+    report = prune_stale_serve_instances(
+        tmp_path,
+        probe=_probe(alive=False),
+        emit=events.append,
+        boot_id="bootcafe",
+    )
+
+    assert report["deleted_count"] == 1
+    assert len(events) == 1, events
+    event = events[0]
+    assert event["event"] == SERVE_REGISTRY_PRUNED_EVENT
+    assert event["action"] == "removed"
+    assert event["pid"] == 101
+    # The CLASSIFIER's word, not a second vocabulary minted for the log.
+    assert event["reason"] == CLASSIFICATION_STALE_DEAD_PID
+    assert event["classification_reason"] == "pid_not_running"
+    assert event["by_pid"] == os.getpid()
+    assert event["boot_id"] == "bootcafe"
+
+
+def test_a_recycled_row_is_refused_and_the_refusal_is_a_line_too(tmp_path):
+    """"What it removes AND what it refuses" — a survivor is a fact as well.
+
+    A live process wearing a dead serve's pid number is exactly what an
+    operator wants told: the prune deliberately keeps it, and a report that
+    only ever lists deletions cannot say that anything looked at it.
+
+    *Killing mutation:* emit only on the delete arm (drop the ``refused``
+    call) and this row goes red on an empty event list.
+    """
+
+    _register(tmp_path, pid=303, probe=_probe(start_time=3))
+    events: list[dict] = []
+
+    prune_stale_serve_instances(
+        tmp_path,
+        probe=_probe(start_time=999),
+        emit=events.append,
+        boot_id="bootcafe",
+    )
+
+    assert [event["action"] for event in events] == ["refused"]
+    assert events[0]["reason"] == CLASSIFICATION_STALE_RECYCLED_PID
+    assert events[0]["classification_reason"] == "start_time_mismatch"
+    assert serve_instance_path(tmp_path, 303).exists()
+
+
+def test_a_live_row_says_nothing_at_all(tmp_path):
+    """The quiet rule. This boot's OWN row classifies ``live`` on every prune;
+    a line for it would be a line on every boot, which is how a channel stops
+    being read.
+
+    *Killing mutation:* emit for every row (drop the ``!= CLASSIFICATION_LIVE``
+    guard) and this row goes red with one ``refused`` event.
+    """
+
+    _register(tmp_path, pid=707, probe=_probe(start_time=7))
+    events: list[dict] = []
+
+    prune_stale_serve_instances(
+        tmp_path, probe=_probe(start_time=7), emit=events.append
+    )
+
+    assert events == []
+
+
+def test_an_unreadable_row_is_refused_under_the_classifiers_own_reason(tmp_path):
+    """``unknown`` is the fail-safe direction, and it is REPORTED, not silent."""
+
+    serve_instances_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+    (serve_instances_dir(tmp_path) / "99.json").write_bytes(b"{not json")
+    events: list[dict] = []
+
+    prune_stale_serve_instances(tmp_path, probe=_probe(), emit=events.append)
+
+    assert [event["reason"] for event in events] == [CLASSIFICATION_UNKNOWN]
+    assert events[0]["classification_reason"] == "record_unreadable"
+    assert events[0]["action"] == "refused"
+    # No caller boot to name: the key is ABSENT rather than null or invented.
+    assert "boot_id" not in events[0]
+
+
+def test_a_sink_that_raises_never_costs_the_prune_its_work(tmp_path):
+    """Bookkeeping about bookkeeping. A logging sink is not allowed to be the
+    reason a boot fails or a dead row survives.
+
+    *Killing mutation:* call ``emit(event)`` unguarded and this row goes red
+    with the sink's own ``RuntimeError``.
+    """
+
+    _register(tmp_path, pid=808, probe=_probe(start_time=8))
+
+    def _explode(_event):
+        raise RuntimeError("the sink is on fire")
+
+    report = prune_stale_serve_instances(
+        tmp_path, probe=_probe(alive=False), emit=_explode
+    )
+
+    assert report["deleted_count"] == 1
+    assert not serve_instance_path(tmp_path, 808).exists()
+
+
+def test_the_prune_reports_the_same_thing_with_no_sink_at_all(tmp_path):
+    """``emit`` is additive: every existing caller passes none."""
+
+    _register(tmp_path, pid=909, probe=_probe(start_time=9))
+
+    report = prune_stale_serve_instances(tmp_path, probe=_probe(alive=False))
+
+    assert report["deleted_count"] == 1
+    assert [row["pid"] for row in report["deleted"]] == [909]
+
+
+def test_prune_keeps_entries_it_could_not_classify(tmp_path):
+    _register(tmp_path, pid=505)
+    blind = ProcessProbe(
+        alive=lambda pid: None, start_time=lambda pid: None, cmdline=lambda pid: None
+    )
+
+    report = prune_stale_serve_instances(tmp_path, probe=blind)
+
+    assert report["deleted"] == []
+    assert serve_instance_path(tmp_path, 505).exists()
+
+
+def test_unregister_removes_the_entry_and_is_idempotent(tmp_path):
+    _register(tmp_path, pid=606)
+
+    assert unregister_serve_instance(tmp_path, pid=606) is True
+    assert unregister_serve_instance(tmp_path, pid=606) is False
+    assert list_serve_instances(tmp_path, probe=_probe()) == []
+
+
+def test_the_real_os_probe_recognises_a_process_that_has_exited(tmp_path):
+    """One pass with NO injected probe: the default path must actually work.
+
+    Every other test here drives synthetic probes, which would all still pass
+    if the real ``_pid_alive`` / start-time readers were broken.
+    """
+
+    register_serve_instance(tmp_path, pid=_dead_pid(), build=None)
+
+    rows = list_serve_instances(tmp_path)
+
+    assert rows[0]["classification"] == CLASSIFICATION_STALE_DEAD_PID
+
+
+def test_an_absent_registry_directory_lists_empty(tmp_path):
+    assert list_serve_instances(tmp_path / "never-booted", probe=_probe()) == []
+
+
+def test_registration_reports_failure_instead_of_raising(tmp_path):
+    blocked = tmp_path / "file"
+    blocked.write_bytes(b"not a directory\n")
+
+    report = register_serve_instance(blocked / "root", pid=1, probe=_probe())
+
+    assert report.registered is False
+    assert report.outcome.startswith("error:")
+
+
+@pytest.mark.parametrize("pid", [0, -1, "seven", None])
+def test_a_record_without_a_usable_pid_is_unknown(tmp_path, pid):
+    from agent_runtime.serve_registry import classify_serve_instance
+
+    classification, reason = classify_serve_instance({"pid": pid}, probe=_probe())
+
+    assert classification == CLASSIFICATION_UNKNOWN
+    assert reason == "pid_missing"
+
+
+# ── the socket lane's additive fields (slice 3) ─────────────────────────────
+
+
+def test_the_socket_fields_are_always_present_even_on_a_stdio_only_serve(tmp_path):
+    """Null says "this serve has no socket". A MISSING key would say "this entry
+    predates the socket lane" — a different fact, and one a client discovering a
+    service must not have to guess between."""
+
+    register_serve_instance(tmp_path, pid=4242, probe=_probe())
+    stdio_only = json.loads((tmp_path / "serve_instances" / "4242.json").read_bytes())
+
+    assert stdio_only["transport"] == "stdio"
+    assert stdio_only["port"] is None
+    assert stdio_only["socket_started_at"] is None
+
+    register_serve_instance(
+        tmp_path,
+        pid=4243,
+        probe=_probe(),
+        transport="stdio+socket",
+        port=51515,
+        socket_started_at="2026-08-13T00:00:00.000Z",
+    )
+    with_socket = json.loads((tmp_path / "serve_instances" / "4243.json").read_bytes())
+
+    assert with_socket["transport"] == "stdio+socket"
+    assert with_socket["port"] == 51515
+    assert with_socket["socket_started_at"] == "2026-08-13T00:00:00.000Z"
+
+
+# ── the service lifetime's additive fields (L-h) ────────────────────────────
+
+
+def test_the_service_fields_are_always_present_and_default_to_a_stdio_child(tmp_path):
+    """Present-and-false and ABSENT are two different answers.
+
+    ``service: false`` says "this runtime dies with the stdin it was started
+    on"; a MISSING key says "this row was written by a hermes that predates
+    service mode". A client deciding whether to ATTACH to a running process or
+    to start one of its own has to tell those apart — the second is the
+    launcher's condition for falling back to the stdio-pipe transport — so the
+    default WRITES the key rather than omitting it.
+    """
+
+    register_serve_instance(tmp_path, pid=4242, probe=_probe())
+    plain = json.loads((tmp_path / "serve_instances" / "4242.json").read_bytes())
+
+    assert plain["service"] is False
+    assert plain["starter_pid"] is None
+
+    register_serve_instance(
+        tmp_path, pid=4243, probe=_probe(), service=True, starter_pid=1234
+    )
+    durable = json.loads((tmp_path / "serve_instances" / "4243.json").read_bytes())
+
+    assert durable["service"] is True
+    # The pid that STARTED it, computed by the caller at boot — a detached
+    # service is reparented the moment its starter exits, so a parent read later
+    # names somebody else entirely.
+    assert durable["starter_pid"] == 1234
+
+
+def test_a_record_written_before_the_service_fields_existed_still_classifies(tmp_path):
+    """The fallback condition has to survive meeting an old row.
+
+    A registry written by a hermes that predates L-h has no ``service`` key at
+    all, and reading it must be an ordinary classification — not a KeyError, and
+    not a row silently treated as a service.
+    """
+
+    directory = tmp_path / "serve_instances"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "4242.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "pid": 4242,
+                "boot_id": "old",
+                "transport": "stdio+socket",
+                "port": 51515,
+                "started_at_ticks": 1000,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rows = list_serve_instances(tmp_path, probe=_probe())
+
+    assert len(rows) == 1
+    assert rows[0]["classification"] == CLASSIFICATION_LIVE
+    assert "service" not in rows[0]
+
+
+# ── the resolved home (D-3) ─────────────────────────────────────────────────
+
+
+def test_the_record_carries_the_home_the_caller_resolved(tmp_path):
+    """From outside, nothing said which home a running serve resolved.
+
+    ``store_root`` answers "which runtime root" and that is a DIFFERENT
+    question: one machine's roots and its profile homes are separate axes, and
+    a serve child spawned with ``HERMES_HOME`` pointed at ``profiles/base``
+    writes the same ``store_root`` as one that resolved ``profiles/alice``.
+    The value is passed IN — this module never imports ``hermes_constants``,
+    so the field stays unit-testable against an injected string and the
+    resolution stays the caller's job.
+    """
+
+    home = str(Path("X:/Eternia/.hermes/profiles/base"))
+    _register(tmp_path, hermes_home=home)
+
+    record = json.loads(serve_instance_path(tmp_path, 4242).read_bytes().decode("utf-8"))
+
+    assert record["hermes_home"] == home
+    # Additive-null, exactly like port/socket_started_at: no version bump.
+    assert record["schema_version"] == 1
+
+
+def test_an_unresolvable_home_is_written_as_null_never_as_an_empty_string(tmp_path):
+    """Three states, three spellings, and the reader must tell them apart:
+    a path says "this home"; ``null`` says "this serve could not resolve one";
+    an ABSENT key says "this entry predates the field". An empty string is a
+    fourth spelling of the second that reads like a PATH — the path-field
+    lesson this repo has already paid for once.
+    """
+
+    _register(tmp_path, pid=4243)
+
+    raw = serve_instance_path(tmp_path, 4243).read_bytes().decode("utf-8")
+    record = json.loads(raw)
+
+    assert "hermes_home" in record, "the key is ALWAYS written; absence is a fact"
+    assert record["hermes_home"] is None
+    assert '"hermes_home": null' in raw
+    assert '"hermes_home": ""' not in raw
+
+
+def test_a_record_written_before_the_field_existed_classifies_exactly_as_before(
+    tmp_path,
+):
+    """Absence predates the field, and nothing branches on it.
+
+    The two serve children running on the operator's runtime the day this
+    landed carry no ``hermes_home`` — they registered before it existed. A
+    reader that read the missing key as a signal would reclassify them on the
+    day it shipped. Classification must not notice.
+    """
+
+    _register(tmp_path, pid=4244)
+    path = serve_instance_path(tmp_path, 4244)
+    legacy = json.loads(path.read_bytes().decode("utf-8"))
+    legacy.pop("hermes_home", None)
+    path.write_text(json.dumps(legacy, indent=2) + "\n", encoding="utf-8", newline="\n")
+
+    rows = list_serve_instances(tmp_path, probe=_probe())
+
+    assert [row["classification"] for row in rows] == [CLASSIFICATION_LIVE]
+    assert rows[0]["classification_reason"] == ""
+    assert "hermes_home" not in rows[0]
+
+
+def test_unregistering_retries_a_transiently_locked_entry(tmp_path, monkeypatch):
+    """On Windows this is the ORDINARY case, not an exotic one.
+
+    A file created seconds ago in a scanned directory is routinely held open by
+    the AV/indexer for a few tens of milliseconds, and ``unlink`` then fails
+    with WinError 32. Observed live on the drain path — the drain published its
+    terminal frame, released the socket lock, and left its registry entry
+    behind, so discovery advertised a serve that had just gone. The lock cleared
+    after ~16ms; one retry was enough.
+    """
+
+    from pathlib import Path
+
+    register_serve_instance(tmp_path, pid=99, probe=_probe())
+    entry = tmp_path / "serve_instances" / "99.json"
+    assert entry.exists()
+
+    real_unlink = Path.unlink
+    attempts = {"count": 0}
+
+    def _locked_twice(self, *args, **kwargs):
+        if self == entry and attempts["count"] < 2:
+            attempts["count"] += 1
+            raise PermissionError(32, "used by another process")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", _locked_twice)
+    slept: list[float] = []
+
+    assert unregister_serve_instance(
+        tmp_path, pid=99, retry_delay_seconds=0.0, sleep=slept.append
+    ) is True
+    assert attempts["count"] == 2
+    assert len(slept) == 2  # it waited between attempts rather than spinning
+    assert not entry.exists()
+
+
+def test_unregistering_something_already_gone_is_false_without_retrying(tmp_path):
+    """Already gone is a state, not a failure to wait on."""
+
+    slept: list[float] = []
+
+    assert unregister_serve_instance(
+        tmp_path, pid=12345, sleep=slept.append
+    ) is False
+    assert slept == []

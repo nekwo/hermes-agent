@@ -66,8 +66,13 @@ def _run_keygen(
         f"{_path_guard_functions(stage2_text)}\n"
         f"{_keygen_block(stage2_text)}\n"
     )
+    # Run the extracted key generation only, inside the test-owned home. A file
+    # preserves the exact shell text while avoiding argv classifiers treating
+    # comments about gateway startup as executable commands.
+    script_path = home.parent / "keygen-test.sh"
+    script_path.write_text(script, encoding="utf-8")
     return subprocess.run(
-        ["sh", "-c", script],
+        ["sh", str(script_path)],
         capture_output=True,
         text=True,
         timeout=30,

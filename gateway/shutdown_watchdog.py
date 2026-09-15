@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from gateway.restart import GATEWAY_SERVICE_RESTART_EXIT_CODE
-from hermes_constants import get_hermes_home
+from hermes_constants import get_process_hermes_home
 from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
@@ -153,9 +153,17 @@ def _mark_exited_quietly(exit_code: int, reason: str) -> None:
 
 
 def _process_hermes_home() -> Path:
-    """HERMES_HOME for process-level identity files (ignore profile overrides)."""
-    val = os.environ.get("HERMES_HOME", "").strip()
-    return Path(val) if val else get_hermes_home()
+    """HERMES_HOME for process-level identity files (ignore profile overrides).
+
+    Delegates to the canonical :func:`hermes_constants.get_process_hermes_home`
+    (env var → platform default), which never follows the context-local
+    profile override. The previous local copy fell back to
+    ``get_hermes_home()`` when the env var was unset — that resolver DOES
+    honor the override, so a heartbeat/dump written mid persona-turn could
+    land in the wrong profile directory (same class as gateway/status.py
+    issue #56986).
+    """
+    return get_process_hermes_home()
 
 
 def _home(home: Optional[Path]) -> Path:

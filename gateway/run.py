@@ -3251,7 +3251,11 @@ def _instantiate_builtin_adapter(platform: Platform, config: Any) -> Optional[Ba
     return adapter_cls(config)
 
 
+from gateway.downstream_extensions import DownstreamGatewayMixin, _needs_risk_assessor_warning
+
+
 class GatewayRunner(
+    DownstreamGatewayMixin,
     GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin,
     GatewayVoiceMixin, GatewayAdapterLifecycleMixin, GatewayTopicThreadsMixin, GatewayTurnMixin,
     GatewayShutdownMixin, GatewayBusySessionMixin, GatewayConfigLoadersMixin, GatewayStartupMixin,
@@ -3523,12 +3527,7 @@ class GatewayRunner(
             # (tirith disabled AND no auxiliary.approval model) can only gate dangerous commands /
             # execute_code scripts via live in-chat approval.
             _appr_cfg = _load_full_config()
-            _appr_mode = str(
-                cfg_get(_appr_cfg, "approvals", "mode", default="manual") or "manual"
-            ).strip().lower()
-            _tirith_on = bool(cfg_get(_appr_cfg, "security", "tirith_enabled", default=True))
-            _aux_approval = cfg_get(_appr_cfg, "auxiliary", "approval", default=None)
-            if _appr_mode == "manual" and not _tirith_on and not _aux_approval:
+            if _needs_risk_assessor_warning(_appr_cfg):
                 logger.warning(
                     "Gateway approvals.mode=manual with no automated risk "
                     "assessor (security.tirith_enabled is false and "
@@ -5307,6 +5306,12 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         await _discover_gateway_mcp_tools(runner.config)
     except Exception as e:
         logger.debug("MCP tool discovery failed: %s", e)
+
+    try:
+        from tools.process_registry import process_registry as _pr_restore
+        await asyncio.get_running_loop().run_in_executor(None, _pr_restore.restore_durable_completions)
+    except Exception as exc:
+        logger.debug("Delegation completion restore failed: %s", exc)
 
     try:
         success = await runner.start()

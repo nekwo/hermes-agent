@@ -1663,7 +1663,8 @@ class GatewayNotificationsMixin:
             with _log_suppressed(logging.ERROR, "Watcher delivery error: %s"):
                 send_meta = {"thread_id": thread_id} if thread_id else None
                 await adapter.send(
-                    chat_id, message_text, metadata=_non_conversational_metadata(send_meta, platform=platform_name),
+                    chat_id, message_text, reply_to=watcher.get("message_id"),
+                    metadata=_non_conversational_metadata(send_meta, platform=platform_name),
                 )
 
     @staticmethod
@@ -1765,6 +1766,15 @@ class GatewayNotificationsMixin:
                 # wait/log (poll() is read-only and deliberately does NOT mark consumed).
                 if agent_notify and not process_registry.is_completion_consumed(session_id):
                     completion_evt = self._build_process_completion_event(watcher, session, session_id)
+                    async with self._completion_event_scope(watcher):
+                        agent_turns = self._background_agent_turns_enabled()
+                    if not agent_turns:
+                        synth_text = self._format_background_completion_notification(
+                            session_id=session_id, exit_code=session.exit_code,
+                            command=completion_evt["command"], output=completion_evt["output"],
+                        )
+                        await self._send_watcher_message(platform_name, chat_id, thread_id, synth_text, watcher)
+                        break
                     synth_text = format_process_notification(completion_evt)
                     if not synth_text:
                         break

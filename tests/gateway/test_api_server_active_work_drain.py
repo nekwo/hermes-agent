@@ -592,14 +592,12 @@ class TestShutdownSettleWindow:
             _skew[0] += 1.0
             return _real_time(self) + _skew[0]
 
-        monkeypatch.setattr(type(loop), "time", _fast_time)
-        try:
+        with monkeypatch.context() as clock_patch:
+            clock_patch.setattr(type(loop), "time", _fast_time)
             with patch("gateway.status.remove_pid_file"), \
                  patch("gateway.status.write_runtime_status"), \
                  patch("cron.scheduler.mark_job_run"):
                 await runner.stop()
-        finally:
-            monkeypatch.undo()
 
         # One shot from _interrupt_running_agents + one re-signal at settle
         # exit because API work was still live.
@@ -607,5 +605,4 @@ class TestShutdownSettleWindow:
             _INTERRUPT_REASON_GATEWAY_SHUTDOWN,
             _INTERRUPT_REASON_GATEWAY_SHUTDOWN,
         ]
-
 

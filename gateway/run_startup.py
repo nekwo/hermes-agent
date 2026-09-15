@@ -1303,7 +1303,7 @@ class GatewayStartupMixin:
     # name minus the leading underscore.
     _PRE_RECONNECT_WATCHERS = (
         "_session_housekeeping_watcher", "_model_catalog_refresh_watcher", "_session_stall_watcher",
-        "_kanban_notifier_watcher", "_kanban_dispatcher_watcher",
+        "_kanban_notifier_watcher", "_kanban_blocked_pm_hook_watcher", "_kanban_dispatcher_watcher",
     )
     _POST_RECONNECT_WATCHERS = (
         "_handoff_watcher", "_async_delegation_watcher", "_loop_wakeup_watcher", "_profile_reconcile_watcher",

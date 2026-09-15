@@ -1863,3 +1863,6 @@ def __getattr__(name):  # PEP 562 — lazy so no import cycles
     warn_once(__name__, name, *target)
     return getattr(importlib.import_module(target[0]), target[1])
 # ---- END PLUGIN-COMPAT ----
+
+# Permanent fork endpoint compatibility; the implementation stays in its router.
+from hermes_cli.web_routers.profiles import promote_profile_endpoint

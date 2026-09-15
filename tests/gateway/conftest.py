@@ -32,12 +32,23 @@ incident.
 """
 
 import ast
+import importlib.util
 import os
+import socket
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+
+from tests._env_gap_fence import (
+    EnvGapRegistry,
+    EnvGapSkipRegistry,
+    StaleEntryTracker,
+    apply_marks,
+    apply_skips,
+    register_marks,
+)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -491,7 +502,12 @@ def pytest_configure(config):
        fingerprint of the gateway test file mtimes/sizes.  Concurrent
        subprocesses acquire a lock; only the first performs the scan;
        the rest wait and read the cached result.
+    Also registers the environment-gap marks (see the ``_ENV_GAPS`` block at
+    the bottom of this file). That happens before the xdist-worker early return
+    below, because every process needs the marks declared.
     """
+    register_marks(config)
+
     # Only run on the xdist controller (or in non-xdist runs). Skip on
     # worker subprocesses so we don't scan the filesystem N times.
     if hasattr(config, "workerinput"):
@@ -610,4 +626,170 @@ def _write_guard_cache_atomic(cache_file: Path, content: str) -> None:
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+# ── Environment-gap registry (audited 2026-08-10) ──────────────────────
+#
+# This directory registered ~62 node ids as pre-existing Windows/host gaps.
+# The audit reproduced every one and found FIFTY-FOUR were not gaps:
+#
+#   * 39 rows (test_feishu.py + test_setup_feishu.py), filed as "Windows home
+#     resolution is environment-only", were a REAL DEFECT:
+#     plugins/platforms/feishu/adapter.py.__init__ resolved get_hermes_home()
+#     into an attribute and then read the dedup cache off disk. That froze the
+#     path against the construction-time home AND made construction depend on
+#     a resolvable home. Fixed in the code (live-resolving property + hydrate
+#     on first use), not fenced; 38 rows went green on the fix alone. The 39th
+#     was an over-broad patch.dict(os.environ, {}, clear=True) that only ever
+#     looked hermetic because POSIX falls back to pwd.getpwuid().
+#   * 2 rows (test_api_server.py, test_readiness.py) were ALREADY STALE: they
+#     described a HERMES_HOME volume at 93.8% capacity, which it no longer is.
+#     Nothing failed to say so — the stale detector only prints, and it printed
+#     into a summary nobody reads on a permanently red suite. That is the
+#     motivating case for the probe-backed form below.
+#   * 3 rows monkeypatched HOME and expected `~` to follow; ntpath.expanduser
+#     prefers USERPROFILE, so home stayed at the developer's real profile —
+#     under which pytest's tmp_path lives on Windows, so the wrong prefix got
+#     collapsed. They now use tests._home_env.point_home_at.
+#   * the remainder asserted a POSIX SPELLING: a file:// envelope whose
+#     percent-quoting is invisible only because a POSIX path quotes to itself
+#     (they now pin the encode/decode round trip, which is the actual
+#     contract), a "~/" separator, a root-relative "/tmp/wd" that
+#     os.path.abspath drive-qualifies, and two fixtures writing U+2713/U+2192
+#     through Path.write_text with no encoding= while production reads those
+#     files with encoding="utf-8".
+#
+# NOTE on test_platform_base.py: the row correctly observed that
+# _path_under_denied_prefix resolves home with os.path.expanduser("~") while
+# its sibling _media_delivery_denied_paths() prefers $HOME, and correctly
+# declined to "fix" it because reconciling them WIDENS a denial carve-out. The
+# divergence is real and remains an owner decision; the test now patches what
+# the platform actually reads, so it pins the carve-out on both platforms
+# without anyone touching the policy.
+_ENV_GAPS: EnvGapRegistry = {}
+
+
+def _no_af_unix() -> bool:
+    """True where there is no AF_UNIX socket, hence no systemd notify socket."""
+    return not hasattr(socket, "AF_UNIX")
+
+
+def _no_defusedxml() -> bool:
+    """True where the optional defusedxml dependency is absent.
+
+    DEPENDENCY-bound, not platform-bound: plugins/platforms/wecom/
+    callback_adapter.py falls back to ET=None without it and _build_event
+    raises before parsing. Installing defusedxml retires this row outright.
+    """
+    return importlib.util.find_spec("defusedxml") is None
+
+
+def _posix_only_update_spawn() -> bool:
+    """True where _handle_update_command does NOT take the bash/setsid branch.
+
+    gateway/slash_commands.py:5498 branches on sys.platform: the win32 arm
+    spawns the interpreter directly, so the `bash -c` / setsid fallback shape
+    these tests pin is unreachable. The platform IS the mechanism here — the
+    assertion targets a branch the host never selects.
+    """
+    return sys.platform == "win32"
+
+
+def _no_posix_fhs_absolute_dir() -> bool:
+    r"""True where "/etc" cannot name an existing filesystem-absolute directory.
+
+    On Windows a leading slash is drive-relative, so "/etc" resolves to
+    <current drive>:\etc, and there is no drive-independent absolute directory
+    guaranteed to exist. The test states its own assumption ("/etc exists on
+    any POSIX box"), and with no absolute candidate on disk the cwd-relative
+    decoy legitimately wins.
+    """
+    return not os.path.isdir(os.path.abspath(os.sep + "etc"))
+
+
+_ENV_GAP_SKIPS: EnvGapSkipRegistry = {
+    'test_systemd_notify.py': [
+        (
+            _no_af_unix,
+            'gateway/systemd_notify.py returns False up front when '
+            'socket.AF_UNIX is absent; there is no systemd notification socket '
+            'to write to on this platform',
+            {
+                'test_notify_uses_nonblocking_datagram_send',
+                'test_watchdog_sends_ready_heartbeat_and_stopping',
+            },
+        ),
+    ],
+    'test_wecom_callback.py': [
+        (
+            _no_defusedxml,
+            "optional dependency 'defusedxml' is not installed, so "
+            'plugins/platforms/wecom/callback_adapter.py falls back to ET=None '
+            'and _build_event raises AttributeError before parsing anything. '
+            'DEPENDENCY-bound: installing defusedxml retires this row',
+            {
+                'TestWecomCallbackEventConstruction::test_build_event_extracts_text_message',
+                'TestWecomCallbackPollLoop::test_poll_loop_dispatches_handle_message',
+            },
+        ),
+    ],
+    'test_update_command.py': [
+        (
+            _posix_only_update_spawn,
+            'pins the POSIX `bash -c` / setsid spawn shape; '
+            'gateway/slash_commands.py:5498 selects a direct-interpreter spawn '
+            'on win32, so this fallback branch is never reached',
+            {
+                'TestHandleUpdateCommand::test_fallback_when_no_setsid',
+            },
+        ),
+    ],
+    'test_update_streaming.py': [
+        (
+            _posix_only_update_spawn,
+            'asserts PYTHONUNBUFFERED inside the `bash -c` command STRING; the '
+            'win32 branch of _handle_update_command spawns an argv list and '
+            'passes the env through Popen(env=...) instead',
+            {
+                'TestUpdateCommandGatewayFlag::test_spawns_with_gateway_flag',
+            },
+        ),
+    ],
+    'test_complete_path_at_filter.py': [
+        (
+            _no_posix_fhs_absolute_dir,
+            'the test states its own assumption — "/etc exists on any POSIX '
+            'box" — and on Windows a leading slash is drive-relative, so no '
+            'filesystem-absolute candidate exists and the cwd-relative decoy '
+            'correctly wins',
+            {
+                'test_leading_slash_prefers_a_real_absolute_path',
+            },
+        ),
+    ],
+}
+
+#: The directory this conftest's registries own. The env-gap hooks below are
+#: GLOBAL — pytest hands them every item and every report in the session once
+#: this conftest is loaded — so a combined run would otherwise let these rows
+#: reach a same-named file in another directory. See tests/_env_gap_fence.py.
+_OWNER_DIR = Path(__file__).resolve().parent
+
+_STALE = StaleEntryTracker(_ENV_GAPS, "tests/gateway/conftest.py")
+
+
+def pytest_collection_modifyitems(items):  # noqa: D401 — pytest hook
+    """Attach the environment-gap mark to every registered node id."""
+    apply_marks(items, _ENV_GAPS, owner_dir=_OWNER_DIR)
+    apply_skips(items, _ENV_GAP_SKIPS, owner_dir=_OWNER_DIR)
+
+
+def pytest_runtest_logreport(report):  # noqa: D401 — pytest hook
+    """Record registered environment-gap node ids that actually passed."""
+    _STALE.record(report)
+
+
+def pytest_terminal_summary(terminalreporter):  # noqa: D401 — pytest hook
+    """Surface registry rows that no longer describe a real failure."""
+    _STALE.report(terminalreporter)
 

@@ -283,6 +283,10 @@ class TestWatcherRespawnLive:
 class TestResumeVerificationLive:
     """The user-visible lie: '✓ Restarting' printed for a dead gateway."""
 
+    # The real negative liveness poll itself takes 30 seconds, plus process
+    # startup and a final bounded Windows process-table probe. The suite's
+    # default 30-second test timeout cannot observe its expected refusal.
+    @pytest.mark.timeout(90)
     def test_dead_relaunch_is_not_reported_as_success(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
         (tmp_path / "home").mkdir(parents=True, exist_ok=True)

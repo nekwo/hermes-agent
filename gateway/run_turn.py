@@ -3912,7 +3912,9 @@ class GatewayTurnMixin:
             _heartbeat_text = (
                 disp._generic_status_phrase("status")
                 if _long_running_mode == "generic"
-                else f"⏳ Working — {_elapsed_mins} min{_status_detail}"
+                else self._format_long_running_heartbeat(
+                    elapsed_seconds=time.time() - _notify_start, status_detail=_status_detail,
+                )
             )
             try:
                 _notify_res = None

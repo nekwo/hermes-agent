@@ -825,7 +825,7 @@ def _kanban_board_db_paths() -> List[Path]:
 
 def _media_delivery_denied_paths() -> List[Path]:
     """Return absolute denylist paths under which delivery is never allowed."""
-    home = Path(os.path.expanduser("~"))
+    home = Path(os.environ.get("HOME") or os.path.expanduser("~"))
     return [*map(Path, _MEDIA_DELIVERY_DENIED_PREFIXES),
             *(home / sub for sub in _MEDIA_DELIVERY_DENIED_HOME_SUBPATHS),
             *(r / rel for r in _credential_home_roots() for rel in _ROOT_CREDENTIAL_PATHS),
@@ -1211,7 +1211,7 @@ MEDIA_TAG_CLEANUP_RE = re.compile(
     r'''[`"'*_]{0,3}MEDIA:\s*'''
     r'''(?P<path>`[^`\n]+?`|"[^"\n]+?"|'[^'\n]+?'|'''
     r'''(?:~/|/|[A-Za-z]:[/\\])\S+?(?:[^\S\n]+\S+?)*?\.(?:''' + _MEDIA_EXT_ALTERNATION + r'''))'''
-    r'''(?=[\s`"'*_,;:)\]}\[''' + _MEDIA_CJK_TERMINATORS + r''']|MEDIA:|\.(?:\s|$)|$)[`"'*_]{0,3}\.?''',
+    r'''(?=[\s`"'*_,;:)\]}\[\\''' + _MEDIA_CJK_TERMINATORS + r''']|MEDIA:|\.(?:\s|$)|$)[`"'*_]{0,3}\.?''',
     re.IGNORECASE)
 
 # Extension-less (Caddyfile) / unknown-ext (.py, .log) tags deliver only after
@@ -2969,6 +2969,8 @@ class BasePlatformAdapter(ABC):
         seen_paths: set = set()
 
         def _add(path: str) -> None:
+            if "\x00" in path:
+                return
             # is_voice only for audio: a voice-flagged image would leave the photo batch.
             if path not in seen_paths:
                 seen_paths.add(path)

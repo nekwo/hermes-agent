@@ -387,6 +387,9 @@ def _notif_poll_kanban(sid: str, session: dict) -> None:
         texts = []
     for text in texts:
         _emit("status.update", sid, {"kind": "process", "text": text})
+    if not _tui_background_agent_turns_enabled():
+        session.pop("_kanban_pending", None)
+        return
     if texts:
         session.setdefault("_kanban_pending", []).extend(texts)
     if not session.get("_kanban_pending") or not _notif_claim_turn(session):
@@ -452,6 +455,13 @@ def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred, com
                         else process_completion_display_text([evt]) if evt_type == "completion" else text)
         _emit("status.update", sid, {"kind": "process", "text": display_text})
         emitted.add(dedup_key)
+    if not _tui_background_agent_turns_enabled():
+        # Visibility consumed the event. Settle its durable delivery receipt without creating a turn.
+        from tools.async_delegation import claim_event_delivery, complete_event_delivery
+        claim = claim_event_delivery(evt, "tui-visibility-only")
+        if claim is not None:
+            complete_event_delivery(evt, claim)
+        return True
     if evt_type == "completion" and completions is not None:
         completions.append((evt, text))
         return True
@@ -707,3 +717,13 @@ def _prepend_note(run_message: Any, note: str) -> Any:
 def register(server) -> None:
     """Publish this module's helpers + handlers onto ``server``, rebound to its globals."""
     bind_module(globals(), server, skip=("_",))
+
+
+def _tui_background_agent_turns_enabled() -> bool:
+    raw = os.getenv("HERMES_BACKGROUND_AGENT_TURNS", "").strip().lower()
+    if not raw:
+        cfg = _load_cfg()
+        display = cfg.get("display", {}) if isinstance(cfg, dict) else {}
+        if isinstance(display, dict):
+            raw = str(display.get("background_process_agent_turns", "") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on", "agent", "legacy"}

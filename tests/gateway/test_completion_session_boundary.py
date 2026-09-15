@@ -55,6 +55,8 @@ def _runner(adapter, *, session_db=...):
         event._gateway_accepted = True
     adapter.handle_message.side_effect = admit
     runner = object.__new__(GatewayRunner)
+    # These cases cover the opt-in agent-turn lane, not the fork's text default.
+    runner._background_agent_turns_enabled = lambda: True
     runner._running = True
     runner.adapters = {Platform.TELEGRAM: adapter}
     runner.session_store = SimpleNamespace(

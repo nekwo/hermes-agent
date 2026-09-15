@@ -9,6 +9,7 @@ from hermes_cli.cli_output import line_input
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -584,21 +585,8 @@ def _scan_gateway_pids(
     current_profile_name_lc = current_profile_name.lower()
 
     def _matches_current_profile(command: str) -> bool:
-        command_lc = command.lower().replace("\\", "/")
-        if current_profile_name:
-            # Token equality, not substring: `-p ops` must not claim (or SIGTERM) an `-p ops-2` gateway.
-            return (
-                profile_flag_value(command_lc) == current_profile_name_lc
-                or f"hermes_home={current_home_lc}" in command_lc
-            )
-
-        # Default profile: accept unless argv advertises another profile in any spelling the CLI
-        # pre-parser accepts (``--profile=ops`` slipped past a substring test, so a default-profile
-        # fallback stop could SIGTERM the named gateway). HERMES_HOME may come via env (invisible to
-        # wmic/CIM), so only a non-matching explicit HERMES_HOME= disqualifies.
-        if profile_flag_value(command_lc) is not None:
-            return False
-        return not ("hermes_home=" in command_lc and f"hermes_home={current_home_lc}" not in command_lc)
+        return _command_matches_profile(command, profile_name=current_profile_name_lc,
+                                        hermes_home=current_home_lc)
 
     def _consider(pid: int, command: str) -> None:
         matches_runtime = looks_like_gateway_command_line(command) or (
@@ -2089,7 +2077,7 @@ class SystemScopeRequiresRootError(RuntimeError):
 
 def _user_runtime_dir() -> Path:
     """``$XDG_RUNTIME_DIR`` or ``/run/user/<uid>`` (regardless of existence)."""
-    return Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")  # windows-footgun: ok — POSIX systemd helper, never invoked on Windows
+    return Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{_posix_uid_or_zero()}")  # windows-footgun: ok — POSIX systemd helper, never invoked on Windows
 
 
 def _user_dbus_socket_path() -> Path:
@@ -2140,7 +2128,10 @@ def _ensure_user_systemd_env() -> None:
     points at ``/run/user/0``) is dropped in favour of our own ``/run/user/{uid}`` so ``systemctl --user``
     targets the right instance instead of an unreadable foreign socket (#86558).
     """
-    uid = os.getuid()  # windows-footgun: ok — POSIX systemd helper, never invoked on Windows
+    getuid = getattr(os, "getuid", None)
+    if not callable(getuid):
+        return
+    uid = int(getuid())
     xdg = os.environ.get("XDG_RUNTIME_DIR")
     if (not xdg or not _runtime_dir_is_ours(xdg)) and _runtime_dir_is_ours(f"/run/user/{uid}"):
         os.environ["XDG_RUNTIME_DIR"] = f"/run/user/{uid}"
@@ -4768,6 +4759,10 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
         console_window_attached=_console_window_attached, detached=_gateway_detached_env(),
         breakaway=_breakaway, absorb_windows_console_controls=_absorb,
     )
+    try:
+        _emit_gateway_home_receipt(_exit_diag)
+    except Exception:
+        pass
     _atexit.register(lambda: _exit_diag("atexit.hook", sys_exc=repr(sys.exc_info())))
 
     _respawn_storm_backoff()
@@ -6438,3 +6433,139 @@ def __getattr__(name):  # PEP 562 — lazy so no import cycles
     warn_once(__name__, name, *target)
     return getattr(importlib.import_module(target[0]), target[1])
 # ---- END PLUGIN-COMPAT ----
+
+
+def _venv_interpreter(venv: Path) -> Path:
+    """The interpreter path inside ``venv`` for this platform."""
+    from hermes_constants import venv_python_path
+
+    return venv_python_path(venv, windows=is_windows())
+
+
+class ManagedPythonUnavailable(RuntimeError):
+    """No interpreter could be resolved as the one Hermes is installed into."""
+
+
+def resolve_managed_python() -> str:
+    """Return the interpreter Hermes is INSTALLED INTO — the one updates sync.
+
+    Same layout knowledge as :func:`_detect_venv_dir` (this process's venv via
+    ``sys.prefix``, then ``$VIRTUAL_ENV``, then the ``.venv``/``venv``
+    checkout layouts that ``_venv_core_imports_healthy`` and
+    ``managed_uv._default_live_venv`` already treat as the install). It
+    deliberately does NOT introduce a second notion of "the managed
+    environment" — there was no accessor for it at all, which is why the
+    launcher renderer had nothing better to ask.
+
+    The difference from :func:`get_python_path` is the fallback, and it is the
+    whole point: ``get_python_path`` ends in ``sys.executable``, which is
+    right for ephemeral work in a dev checkout and wrong for anything
+    persisted. Stamped into a launcher artifact, that fallback silently pins
+    whichever interpreter happened to run the install — the gateway then boots
+    for months against a package set nobody maintains, and the failure only
+    surfaces as a missing-module traceback at some later boot.
+
+    Raises :class:`ManagedPythonUnavailable` with a single-line reason naming
+    what was looked for. Callers persisting an artifact must let it propagate
+    rather than degrade to a guess.
+    """
+    venv = _detect_venv_dir()
+    if venv is None:
+        raise ManagedPythonUnavailable(
+            "no Hermes virtualenv found (looked at sys.prefix, $VIRTUAL_ENV, "
+            f"{PROJECT_ROOT / '.venv'}, {PROJECT_ROOT / 'venv'})"
+        )
+    interpreter = _venv_interpreter(venv)
+    if not interpreter.exists():
+        raise ManagedPythonUnavailable(
+            f"virtualenv {venv} has no interpreter at {interpreter}"
+        )
+    return str(interpreter)
+
+
+def _posix_uid_or_zero() -> int:
+    getuid = getattr(os, "getuid", None)
+    return int(getuid()) if callable(getuid) else 0
+
+
+def _emit_gateway_home_receipt(emit_diag) -> dict:
+    """Build and emit this boot's home-resolution receipt. Returns the receipt.
+
+    Split out of :func:`run_gateway` so it is testable without booting a
+    gateway — ``run_gateway`` guards a live process and cannot be called in a
+    unit test.
+    """
+    from hermes_constants import get_default_hermes_root, get_hermes_home
+
+    from hermes_cli.gateway_home_receipt import (
+        RESOLUTION_DEFAULT,
+        RESOLUTION_ENV_VAR,
+        build_gateway_home_receipt,
+        env_key_names,
+        suspicious_home_row,
+        wrapper_profiles,
+    )
+
+    home = Path(get_hermes_home())
+    receipt = build_gateway_home_receipt(
+        hermes_home=home,
+        resolution=os.environ.get(RESOLUTION_ENV_VAR) or RESOLUTION_DEFAULT,
+        env_keys=env_key_names(home / ".env"),
+    )
+    emit_diag("gateway.home_resolution", **receipt)
+    logger.info("Gateway home resolution: %s", receipt["summary"])
+
+    suspicious = suspicious_home_row(
+        receipt,
+        installed_wrapper_profiles=wrapper_profiles(
+            Path(get_default_hermes_root()) / "profiles"
+        ),
+    )
+    if suspicious is not None:
+        emit_diag("gateway.home_suspicious", **suspicious)
+        logger.warning(
+            "%s — %s", suspicious["summary"], suspicious["fix_hint"]
+        )
+    return receipt
+
+
+def _command_matches_profile(command: str, *, profile_name: str, hermes_home: str) -> bool:
+    """Return whether a process command belongs to the requested profile.
+
+    Use token/boundary-aware profile matching so ``--profile alice`` does not
+    accidentally match ``--profile aliceimagecron`` in Windows process scans.
+
+    Windows command lines and ``HERMES_HOME`` values mix separators freely, so
+    normalize both sides to forward slashes *first* (upstream's normalization)
+    and only then apply the boundary-aware matching. Callers may pass an
+    already-normalized home; normalizing again is idempotent.
+    """
+    from gateway.status import profile_flag_value
+    command_lc = command.lower().replace("\\", "/")
+    profile_name = (profile_name or "").lower()
+    hermes_home = (hermes_home or "").lower().replace("\\", "/").rstrip('/')
+
+    def _has_exact_profile_arg(flag: str) -> bool:
+        if not profile_name:
+            return False
+        pattern = rf"(?:^|\s){re.escape(flag)}\s+[\"']?{re.escape(profile_name)}[\"']?(?=$|\s)"
+        return re.search(pattern, command_lc) is not None
+
+    def _has_matching_home() -> bool:
+        if not hermes_home:
+            return False
+        pattern = rf"hermes_home=[\"']?{re.escape(hermes_home)}[\"']?(?=$|\s|;|&|\|)"
+        return re.search(pattern, command_lc) is not None
+
+    if profile_name:
+        return profile_flag_value(command_lc) == profile_name or _has_matching_home()
+
+    # Default-profile case: no profile flag in argv. Accept as long as the
+    # command doesn't advertise *some other* profile. HERMES_HOME may be passed
+    # via env (not visible in wmic/CIM command line) so its absence is NOT
+    # disqualifying — only a non-matching explicit HERMES_HOME= in argv is.
+    if profile_flag_value(command_lc) is not None:
+        return False
+    if "hermes_home=" in command_lc and not _has_matching_home():
+        return False
+    return True

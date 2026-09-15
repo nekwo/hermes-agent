@@ -329,7 +329,8 @@ class TestSendUpdateNotification:
         }
         (hermes_home / ".update_pending.json").write_text(json.dumps(pending))
         (hermes_home / ".update_output.txt").write_text(
-            "→ Found 3 new commit(s)\n✓ Code updated!\n✓ Update complete!"
+            "→ Found 3 new commit(s)\n✓ Code updated!\n✓ Update complete!",
+            encoding="utf-8",
         )
         (hermes_home / ".update_exit_code").write_text("0")
 
@@ -360,7 +361,7 @@ class TestSendUpdateNotification:
         pending_path.write_text(json.dumps({
             "platform": "telegram", "chat_id": "111", "user_id": "222",
         }))
-        output_path.write_text("✓ Done")
+        output_path.write_text("✓ Done", encoding="utf-8")
         exit_code_path.write_text("0")
 
         # Adapter send raises
@@ -395,7 +396,7 @@ class TestSendUpdateNotification:
         output_path = hermes_home / ".update_output.txt"
         exit_code_path = hermes_home / ".update_exit_code"
         pending_path.write_text(json.dumps(pending))
-        output_path.write_text("Done")
+        output_path.write_text("Done", encoding="utf-8")
         exit_code_path.write_text("0")
 
         # Only telegram adapter available, but pending says discord
@@ -503,13 +504,49 @@ class TestUpdateInHelp:
 
 
     def test_update_is_known_command(self):
-        """/update dispatches through the gateway's plain-command handler table.
+        """`/update` resolves through the real gateway command registry.
 
-        (Was an inspect.getsource() check for the literal '"update"' in
-        _handle_message — a banned source-reading test. The if-chain was
-        replaced by _gateway_plain_command_handlers(), so assert the real
-        dispatch contract: the table maps "update" to the update handler.)
+        REPLACED 2026-08-09. This used to be::
+
+            source = inspect.getsource(GatewayRunner._handle_message)
+            assert '"update"' in source
+
+        which was **permanently green by construction**. ``_handle_message`` is
+        ~71.8 KB of source and the literal ``"update"`` occurs in it many times
+        over — a busy-policy dispatch entry, a canonical-name comparison, log
+        strings — so no amount of unregistering ``/update`` could have failed it.
+
+        The comment it carried also described a mechanism that no longer exists:
+        ``_known_commands`` is not a local of ``_handle_message`` any more, and
+        has not been for some time. ``_handle_message`` imports
+        ``GATEWAY_KNOWN_COMMANDS`` from ``hermes_cli.commands``. So the test was
+        grepping a 71.8 KB haystack as a "proxy" for a variable that had been
+        gone long enough for nobody to notice, and reporting success either way.
+
+        That registry is importable, and ``tests/cli/test_version_command.py``
+        already imports it, so there was never a reason to grep. Asserted here
+        against the thing that actually decides whether the command runs.
         """
+
+        from hermes_cli.commands import (
+            GATEWAY_KNOWN_COMMANDS,
+            is_gateway_known_command,
+            resolve_command,
+        )
+
+        assert "update" in GATEWAY_KNOWN_COMMANDS
+        assert is_gateway_known_command("update")
+
+        # ...and it resolves to a real definition, not merely a name in a set.
+        # An entry the resolver cannot turn into a CommandDef would be
+        # recognised and then go nowhere.
+        command = resolve_command("update")
+        assert command is not None
+        assert command.name == "update"
+        assert command.description
+
+        # The handler the gateway dispatches to must exist. This is the half the
+        # old assertion was reaching for and could not express.
         from gateway.run import GatewayRunner
 
         runner = object.__new__(GatewayRunner)
