@@ -13,7 +13,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Protocol, Tuple
 
 from agent.skill_utils import is_excluded_skill_path
 from hermes_cli.archive_safe import archive_root_dirs, make_targz, normalize_archive_parts, safe_extract_targz
@@ -1058,42 +1058,30 @@ def _argv_profile_selectors(argv: list):
             yield tok.split("=", 1)[1]
 
 
-def _profile_bound_backend_pids(canon: str, profile_dir: Path) -> list[int]:
+def _profile_bound_backend_pids(canon: str, profile_dir: Path, *, table: Optional["_ProcessTable"] = None) -> list[int]:
     """PIDs of running Hermes *backends* bound to this profile (``gateway.pid`` only tracks
     the messaging gateway). Tightly scoped: current-user processes, backend subcommands only
-    (never an interactive ``chat``/``tui``), never this process or its ancestors. Empty when
-    ``psutil`` can't inspect anything."""
-    try:
-        import psutil  # type: ignore
-    except Exception:
-        return []
+    (never an interactive ``chat``/``tui``), never this process or its ancestors. Raises ProcessTableUnreadable when no inspector is available."""
+    if table is None:
+        table = _PROCESS_LISTER.read()
+        if table is None:
+            raise ProcessTableUnreadable("Cannot inspect profile backend writers")
     try:
         resolved_dir = profile_dir.resolve()
     except OSError:
         resolved_dir = profile_dir
 
-    # Never terminate ourselves or a parent (`hermes -p <canon> profile delete` runs under
-    # the very profile it's deleting).
-    skip: set[int] = {os.getpid()}
-    with contextlib.suppress(Exception):
-        parent = psutil.Process(os.getpid()).parent()
-        while parent is not None:
-            skip.add(parent.pid)
-            parent = parent.parent()
-    try:
-        current_user = psutil.Process(os.getpid()).username()
-    except Exception:
-        current_user = None
+    skip = {table.self_pid} | set(table.ancestor_pids)
+    current_user = table.current_username
     pids: list[int] = []
-    for proc in psutil.process_iter(["pid", "name", "username", "cmdline"]):
+    for proc in table.processes:
         try:
-            info = proc.info
-            pid = info.get("pid")
+            pid = proc.pid
             if pid is None or pid in skip:
                 continue
-            if current_user is not None and info.get("username") != current_user:
+            if current_user is not None and proc.username != current_user:
                 continue
-            argv = info.get("cmdline") or []
+            argv = list(proc.cmdline)
             if not argv or not _is_hermes_argv(argv):
                 continue
             if not ({tok.lower() for tok in argv} & _BACKEND_TOKENS):
@@ -1128,11 +1116,11 @@ def _wait_then_force_kill(pids: List[int], start_times: dict, *, wait: float = 1
     return False
 
 
-def _stop_profile_backends(canon: str, profile_dir: Path) -> None:
+def _stop_profile_backends(canon: str, profile_dir: Path, *, table: Optional["_ProcessTable"] = None) -> None:
     """Terminate Desktop-spawned / stray backends bound to this profile. Complements
     ``_stop_gateway_process`` (which only knows ``gateway.pid``): a live ``serve``/``dashboard``
     keeps creating files while ``rmtree`` walks, so the final rmdir fails ENOTEMPTY."""
-    pids = _profile_bound_backend_pids(canon, profile_dir)
+    pids = _profile_bound_backend_pids(canon, profile_dir, table=table)
     if not pids:
         return
     try:
@@ -1209,13 +1197,38 @@ def _print_delete_summary(canon: str, profile_dir: Path, gw_running: bool, wrapp
         print("  ⚠ Gateway is running — it will be stopped.")
 
 
-def delete_profile(name: str, yes: bool = False) -> Path:
+def delete_profile(name: str, yes: bool = False, *, force_unverified_writers: bool = False) -> Path:
     """Delete a profile, its wrapper script, and its gateway service (service disabled first
     to prevent auto-restart, gateway stopped if running)."""
     canon = normalize_profile_name(name)
     if canon == "default":
         raise ValueError("Cannot delete the default profile (~/.hermes).\nTo remove everything, use: hermes uninstall")
     canon, profile_dir = _existing_profile_dir(canon)
+    process_table = _PROCESS_LISTER.read()
+    if process_table is None:
+        if not force_unverified_writers:
+            raise ProfileDeleteBlocked(
+                "process_table_unreadable",
+                f"Refusing to delete profile '{canon}': this machine has no "
+                "process inspector, so Hermes cannot check whether a Hermes "
+                "backend (serve / dashboard / gateway) is still writing into "
+                f"{profile_dir}. Deleting blind can leave the directory "
+                "half-removed while a live writer recreates files under it.\n"
+                "  Fix it:   install psutil (pip install psutil), then retry — "
+                "any bound backend is found and stopped first.\n"
+                "  Or force: hermes profile delete "
+                f"{canon} --force-unverified-writers",
+                safe_details={
+                    "profile": canon,
+                    "override_flag": "--force-unverified-writers",
+                },
+            )
+        print(
+            "⚠ --force-unverified-writers: deleting without checking for "
+            "backends bound to this profile (no process inspector on this "
+            "machine). A live writer can leave files behind."
+        )
+
     gw_running = _check_gateway_running(profile_dir)
     wrapper_path = _get_wrapper_dir() / canon
     has_wrapper = wrapper_path.exists()
@@ -1240,7 +1253,8 @@ def delete_profile(name: str, yes: bool = False) -> Path:
     # keep writing, which made rmtree fail ENOTEMPTY and resurrected the deleted tree.
     if gw_running:
         _stop_gateway_process(profile_dir)
-    _stop_profile_backends(canon, profile_dir)
+    if process_table is not None:
+        _stop_profile_backends(canon, profile_dir, table=process_table)
 
     # Tombstone before rmtree so a stale serve/logging mkdir cannot relist this name live.
     mark_named_profile_deleted(profile_dir)
@@ -1281,6 +1295,7 @@ def delete_profile(name: str, yes: bool = False) -> Path:
     _retarget_active_profile(canon, "default", "✓ Active profile reset to default")
     if remove_error is not None:
         raise RuntimeError(f"Could not remove profile directory {profile_dir}: {remove_error}") from remove_error
+    _mark_profile_personas_orphaned(canon)
     print(f"\nProfile '{canon}' deleted.")
     return profile_dir
 
@@ -1825,3 +1840,260 @@ def has_bundled_skills_opt_out(profile_dir: Path) -> bool:
     except OSError:
         return False
 # ---- END PLUGIN-COMPAT ----
+
+
+# Downstream profile deletion inspection and template contracts.
+class ProcessTableUnreadable(Exception):
+    """Raised when this machine cannot be asked which processes are running.
+
+    The factual half of the delete refusal: ``_PROCESS_LISTER.read()`` answered
+    ``None``, which means there is no inspector at all (no ``psutil``, or it
+    would not import).  That is emphatically NOT "no backends are bound" — that
+    answer is an *empty list read off a table that existed*.  Conflating the
+    two is what let profile delete ``rmtree`` a directory a live backend was
+    still writing into: an unknowable writer set read exactly like a
+    known-empty one, and the caller could not tell which it had.
+
+    ``code`` rides any envelope that carries this outward, the same way
+    ``agent_runtime.errors.ArchiveUnreadable``'s does.
+    """
+
+    code = "process_table_unreadable"
+
+class ProfileDeleteBlocked(Exception):
+    """Raised when ``delete_profile`` refuses, before its first irreversible step.
+
+    ``code`` is the typed machine reason (today only
+    ``process_table_unreadable``); ``safe_details`` carries operator-safe hints
+    only, never profile content.  Mirrors
+    ``agent_runtime.errors.WorkspaceDeleteBlocked``, which is the same shape for
+    the same reason: a delete that cannot establish its precondition refuses
+    with a name the caller can branch on, not a bare string it must match on.
+    """
+
+    def __init__(self, code: str, message: str, *, safe_details: Optional[dict] = None):
+        super().__init__(message)
+        self.code = code
+        self.safe_details = dict(safe_details or {})
+
+@dataclass
+class ProfileTemplateInfo:
+    """Lightweight profile summary for read-only library surfaces."""
+
+    name: str
+    path: Path
+    model: Optional[str] = None
+    provider: Optional[str] = None
+    description: str = ""
+
+@dataclass(frozen=True)
+class _ProcessFacts:
+    """The per-process view this module's process consumers actually read.
+
+    ``read_environ`` stays a callable rather than an already-materialized
+    mapping because the environment read is the expensive, refusable half: it
+    is consulted only for a process whose argv did not already answer the
+    binding question.  Materializing it for every process would turn a rare
+    read into a per-process one, so the laziness is part of the behaviour.
+
+    Fields are optional because different consumers need different columns and
+    a lister only pays for the ones its caller reads — ``psutil.process_iter``
+    is priced per requested attribute.  Profile-delete asks for
+    username/cmdline/environ; the desktop build-lock sweep
+    (``hermes_cli.main._stop_desktop_processes_locking_build``) asks for
+    ``exe``.  One row type, one lister protocol, one table — a second
+    per-process view would be a second seam to keep honest.
+
+    ``inspector_handle`` is the inspector's OWN object for this row, carried so
+    a caller that must ACT on the process (terminate/kill/wait) does not have
+    to re-resolve the pid afterwards.  Re-resolving is how pid-recycle bugs are
+    born: between the walk and the act, the number can belong to something
+    else.  It is ``None`` for a lister that has no such object to offer, and a
+    reading caller never touches it.
+    """
+
+    pid: int
+    username: Optional[str] = None
+    cmdline: Tuple[str, ...] = ()
+    read_environ: Optional[Callable[[], Mapping[str, str]]] = None
+    exe: Optional[str] = None
+    inspector_handle: Optional[object] = None
+
+    def environ(self) -> Mapping[str, str]:
+        """This process's environment, or ``{}`` when there is no reader.
+
+        May raise: a live reader can refuse (``AccessDenied``) even for a
+        same-user process.  The caller treats a refusal exactly as it treats
+        an empty environment — no binding signal — and says so at that site.
+        """
+        if self.read_environ is None:
+            return {}
+        return self.read_environ() or {}
+
+@dataclass(frozen=True)
+class _ProcessTable:
+    """One reading of the process table, as this module consumes it.
+
+    Identity travels WITH the rows on purpose: "which pid am I", "who are my
+    ancestors" and "which user am I" are answers about the same table, and a
+    caller that got its rows from a fake while asking the live machine who it
+    is would be filtering driven rows through undriven facts.
+    """
+
+    self_pid: int
+    ancestor_pids: frozenset
+    current_username: Optional[str]
+    processes: Iterable[_ProcessFacts]
+
+class _ProcessLister(Protocol):
+    """Where ``_profile_bound_backend_pids`` gets its processes."""
+
+    def read(self) -> Optional[_ProcessTable]:
+        """One reading, or ``None`` when the table cannot be inspected at all."""
+        ...
+
+class _PsutilProcessLister:
+    """The production lister: the live OS process table, via ``psutil``."""
+
+    def read(self) -> Optional[_ProcessTable]:
+        try:
+            import psutil  # type: ignore
+        except Exception:
+            # No inspector on this machine.  The caller answers "no bound
+            # backends" — unchanged from before this seam existed.
+            return None
+
+        self_pid = os.getpid()
+
+        # Never terminate ourselves or a parent (e.g. `hermes -p <canon>
+        # profile delete` runs under the very profile it's deleting).
+        ancestors: set[int] = set()
+        try:
+            parent = psutil.Process(self_pid).parent()
+            while parent is not None:
+                ancestors.add(parent.pid)
+                parent = parent.parent()
+        except Exception:
+            pass
+
+        try:
+            current_username: Optional[str] = psutil.Process(self_pid).username()
+        except Exception:
+            current_username = None
+
+        return _ProcessTable(
+            self_pid=self_pid,
+            ancestor_pids=frozenset(ancestors),
+            current_username=current_username,
+            processes=self._iter_processes(psutil),
+        )
+
+    @staticmethod
+    def _iter_processes(psutil) -> Iterator[_ProcessFacts]:
+        """Yield lazily: the caller stops reading as soon as it has its answer."""
+        for proc in psutil.process_iter(["pid", "name", "username", "cmdline"]):
+            try:
+                info = proc.info
+                pid = info.get("pid")
+                if pid is None:
+                    continue
+                yield _ProcessFacts(
+                    pid=pid,
+                    username=info.get("username"),
+                    cmdline=tuple(info.get("cmdline") or ()),
+                    read_environ=proc.environ,
+                )
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+            except Exception:
+                continue
+
+_PROCESS_LISTER: _ProcessLister = _PsutilProcessLister()
+
+
+def available_profile_templates() -> List[ProfileTemplateInfo]:
+    """Return named profile templates without gateway or skill-count probes."""
+    profiles: list[ProfileTemplateInfo] = []
+    try:
+        profiles_root = _get_profiles_root()
+        entries = sorted(profiles_root.iterdir()) if profiles_root.is_dir() else []
+    except Exception:
+        return []
+
+    for entry in entries:
+        try:
+            if not entry.is_dir():
+                continue
+            name = entry.name
+            if name == "default" or not _PROFILE_ID_RE.match(name):
+                continue
+            model, provider = _read_config_model(entry)
+            meta = read_profile_meta(entry)
+            profiles.append(
+                ProfileTemplateInfo(
+                    name=name,
+                    path=entry,
+                    model=model,
+                    provider=provider,
+                    description=meta.get("description", ""),
+                )
+            )
+        except Exception:
+            continue
+
+    return profiles
+
+def available_profile_template_summaries() -> List[ProfileTemplateInfo]:
+    """Return profile metadata without parsing every runtime config.
+
+    Mission Control's available-persona roster uses only the profile name,
+    path, and description. Reading every large ``config.yaml`` merely to
+    discard model/provider adds substantial latency to a cold snapshot. The
+    full :func:`available_profile_templates` contract remains available to CLI
+    callers that render those runtime details.
+    """
+
+    profiles: list[ProfileTemplateInfo] = []
+    try:
+        profiles_root = _get_profiles_root()
+        entries = sorted(profiles_root.iterdir()) if profiles_root.is_dir() else []
+    except Exception:
+        return []
+
+    for entry in entries:
+        try:
+            if not entry.is_dir():
+                continue
+            name = entry.name
+            if name == "default" or not _PROFILE_ID_RE.match(name):
+                continue
+            meta = read_profile_meta(entry)
+            profiles.append(
+                ProfileTemplateInfo(
+                    name=name,
+                    path=entry,
+                    description=meta.get("description", ""),
+                )
+            )
+        except Exception:
+            continue
+
+    return profiles
+
+def _mark_profile_personas_orphaned(profile_name: str) -> None:
+    try:
+        from agent_runtime.store import AgentStore
+    except Exception:
+        return
+    store = AgentStore()
+    try:
+        personas = store.list_all()
+    except Exception:
+        return
+    for persona in personas:
+        if str(getattr(persona, "hermes_profile", "") or "") != profile_name:
+            continue
+        readiness = dict(getattr(persona, "readiness", {}) or {})
+        readiness.update({"orphaned": True, "orphaned_profile": profile_name})
+        persona.readiness = readiness
+        store.save(persona)

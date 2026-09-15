@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
 from hermes_cli.web_deps import late
 from hermes_cli.config import get_process_hermes_home
@@ -43,6 +44,17 @@ from hermes_cli.web_models import (
     ProfileSoulUpdate, ProfileDescriptionUpdate, ProfileModelUpdate, ProfileDescribeAuto,
     SessionPrScanBody)
 from hermes_cli.web_server_profiles import _hermes_home_scope
+
+
+class ProfilePromoteRequest(BaseModel):
+    """Body for ``POST /api/profiles/{name}/promote`` (fork-owned route).
+
+    Declared here rather than in :mod:`hermes_cli.web_models` because the
+    promote route is fork-only: keeping the model next to its single consumer
+    means the shared model module stays a pure mirror of the upstream surface.
+    """
+
+    slot_role: str = "builder"
 
 # Same logger the handlers used before extraction (identical logger object).
 _log = logging.getLogger("hermes_cli.web_server")
@@ -149,10 +161,13 @@ def _profile_errors(log_msg: str, *args, not_found=(FileNotFoundError,),
                     bad_request=(ValueError,)):
     """Map hermes_cli.profiles exceptions to HTTP: ``not_found`` -> 404, ``bad_request`` -> 400
     (in that order), anything else is logged with ``log_msg`` -> 500. HTTPException passes."""
+    from hermes_cli.profiles import ProfileDeleteBlocked
     try:
         yield
     except HTTPException:
         raise
+    except ProfileDeleteBlocked as e:
+        raise HTTPException(status_code=409, detail={"code": e.code, "message": str(e)})
     except not_found as e:
         raise HTTPException(status_code=404, detail=str(e))
     except bad_request as e:
@@ -732,6 +747,51 @@ async def create_profile_endpoint(body: ProfileCreate):
             "hub_installs": hub_installs}
 
 
+@router.post("/api/profiles/{name}/promote")
+async def promote_profile_endpoint(name: str, body: ProfilePromoteRequest):
+    """Mint (and persist) an agent-runtime persona backed by a raw profile.
+
+    Fork-owned route, ported into this router when upstream extracted the
+    profile endpoints out of ``web_server.py``. Registered here — between the
+    ``POST /api/profiles`` and ``GET /api/profiles/active`` handlers — so the
+    global route-registration order matches the pre-extraction file exactly.
+
+    Promotion resolves through the permanent
+    :mod:`agent_runtime.blueprints.resolve` shim, which re-exports
+    ``promote_profile_to_persona`` from :mod:`agent_runtime.personas`. Behavior
+    (mission-lane removal, S11): an explicit matching persona template is
+    cloned; otherwise a profile-backed persona is minted from the agent-runtime
+    defaults while the supplied ``slot_role`` is retained as data.
+    """
+    from hermes_cli import profiles as profiles_mod
+
+    try:
+        profile_name = profiles_mod.normalize_profile_name(name)
+        if not profiles_mod.profile_exists(profile_name):
+            raise HTTPException(status_code=404, detail=f"Profile '{profile_name}' does not exist")
+        from agent_runtime.blueprints.resolve import promote_profile_to_persona
+
+        persona = promote_profile_to_persona(profile_name, slot_role=body.slot_role)
+        return {
+            "ok": True,
+            "profile": profile_name,
+            "persona_id": persona.id,
+            "persona": {
+                "id": persona.id,
+                "display_name": persona.display_name,
+                "role": persona.role,
+                "hermes_profile": persona.hermes_profile,
+            },
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/profiles/%s/promote failed", name)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @router.get("/api/profiles/active")
 async def get_active_profile_endpoint():
     """``active`` is the sticky default written by ``hermes profile use`` (what new CLI
@@ -826,8 +886,16 @@ async def rename_profile_endpoint(name: str, body: ProfileRename):
 
 @router.delete("/api/profiles/{name}")
 async def delete_profile_endpoint(name: str):
-    """The dashboard collects the user's confirmation in its own dialog, so ``yes=True``
-    always skips the CLI's interactive prompt."""
+    """Delete a profile. The dashboard collects the user's confirmation in
+    its own dialog before this request, so we always pass ``yes=True`` to
+    skip the CLI's interactive prompt.
+
+    A typed delete refusal is a 409, not a 500: nothing was touched and nothing
+    crashed, so it must not be logged as an exception or reported to the
+    dashboard as a server fault. There is deliberately no override parameter —
+    forcing a delete past an unknowable writer set is a decision an operator
+    makes at a terminal, not one a dashboard button makes for them.
+    """
     from hermes_cli import profiles as profiles_mod
     with _profile_errors("DELETE /api/profiles/%s failed", name):
         # Polls a running gateway's PID for up to 10 s, then rmtree()s the directory; on the

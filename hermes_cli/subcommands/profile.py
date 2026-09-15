@@ -46,7 +46,16 @@ def build_profile_parser(subparsers, *, cmd_profile: Callable) -> None:
 
     profile_delete = profile_subparsers.add_parser("delete", help="Delete a profile")
     profile_delete.add_argument("profile_name", help="Profile to delete")
-    profile_delete.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
+    profile_delete.add_argument(
+        "-y", "--yes", action="store_true", help="Skip confirmation prompt"
+    )
+    profile_delete.add_argument(
+        "--force-unverified-writers",
+        action="store_true",
+        help="Delete even when this machine cannot list processes, so Hermes "
+             "cannot check whether a backend is still writing into the "
+             "profile. Without it, that case REFUSES (install psutil instead).",
+    )
 
     profile_describe = profile_subparsers.add_parser(
         "describe", help="Read or set a profile's description (used by the kanban orchestrator)")
