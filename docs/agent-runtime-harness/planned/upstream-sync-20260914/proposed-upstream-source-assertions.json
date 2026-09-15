@@ -1,0 +1,363 @@
+{
+  "upstream": "110baa095bc7135a0624557a9cc35df0f98ece0f",
+  "scanned_files": 4905,
+  "new_assertions": 72,
+  "unchanged_upstream_assertions": 71,
+  "entries": [
+    {
+      "key": "tests/agent/test_413_image_payload_recovery.py::TestConversationLoopWiring.test_413_branch_scores_bytes_not_tokens::'new_bytes < original_bytes * 0.95' in src",
+      "function_sha256": "f4a4debca72155cddcd44e979294abe6954e1e4e520eef2c59fdc310752a5c5f",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/agent/test_413_image_payload_recovery.py::TestConversationLoopWiring.test_413_branch_scores_bytes_not_tokens::'new_bytes = serialized_messages_bytes' in branch",
+      "function_sha256": "f4a4debca72155cddcd44e979294abe6954e1e4e520eef2c59fdc310752a5c5f",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/agent/test_413_image_payload_recovery.py::TestConversationLoopWiring.test_413_branch_scores_bytes_not_tokens::'new_bytes = serialized_messages_bytes(messages)' in src",
+      "function_sha256": "f4a4debca72155cddcd44e979294abe6954e1e4e520eef2c59fdc310752a5c5f",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/agent/test_413_image_payload_recovery.py::TestConversationLoopWiring.test_413_branch_scores_bytes_not_tokens::'original_bytes = serialized_messages_bytes' in branch",
+      "function_sha256": "f4a4debca72155cddcd44e979294abe6954e1e4e520eef2c59fdc310752a5c5f",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/agent/test_413_image_payload_recovery.py::TestConversationLoopWiring.test_413_branch_scores_bytes_not_tokens::'original_bytes = serialized_messages_bytes(messages)' in src",
+      "function_sha256": "f4a4debca72155cddcd44e979294abe6954e1e4e520eef2c59fdc310752a5c5f",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/agent/test_compaction_prompt_rebuild.py::TestCommitAlwaysRebuilds.test_drift_rebuild_is_logged::self.assertIn('Compaction rebuilt a drifted system prompt', src)",
+      "function_sha256": "86f980f44cc0cbc44c67b5e60b7a8b0a33f1b43860e0b661edef410ad6011ebd",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/agent/test_compaction_prompt_rebuild.py::TestCommitAlwaysRebuilds.test_keep_prompt_branch_requires_byte_equality::self.assertIn('rebuilt_system_prompt == cached_system_prompt', window, 'keep-prompt must be gated on BYTE EQUALITY of the rebuilt output, not on memory containment')",
+      "function_sha256": "9a40607275b89a120cbc22aaefbd70d2295f6a1835c9d595ae53cb5869f55ff0",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/agent/test_image_corrupt_recovery.py::TestCanonicalHistoryIsolation.test_image_corrupt_branch_strips_only_payload_copy::'_strip_images_from_messages(api_messages)' in body",
+      "function_sha256": "f2a7c079a5e99cbea3c13ae595a03699ff45614f2d09d3a754ce816c00090364",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/agent/test_infinite_compaction_loop.py::TestPressureRealFloor.test_anchored_pressure_is_never_floored::'else:' in window",
+      "function_sha256": "bef43a3cd60642700c4e5ec8997fff7a821e7893fef5dad420d3d91e3ebf8c9c",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/agent/test_infinite_compaction_loop.py::TestPressureRealFloor.test_anchored_pressure_is_never_floored::'request_pressure_tokens = _anchored_pressure' in window",
+      "function_sha256": "bef43a3cd60642700c4e5ec8997fff7a821e7893fef5dad420d3d91e3ebf8c9c",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/agent/test_micro_compaction.py::TestDefragFlushCursorInvalidation.test_finalizer_consumes_flag_and_invalidates_agent_cursor::'_flush_scan_cursor_invalidated' in micro_block",
+      "function_sha256": "f16f7ff1db51118e34bab7cc66273c5003b7f5117c99570b1f9f262a02d49b4e",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/agent/test_micro_compaction.py::TestDefragFlushCursorInvalidation.test_finalizer_consumes_flag_and_invalidates_agent_cursor::'agent._db_flush_scan_prefix = None' in micro_block",
+      "function_sha256": "f16f7ff1db51118e34bab7cc66273c5003b7f5117c99570b1f9f262a02d49b4e",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/agent/test_turn_base_display_anchor.py::TestInvalidationSitesClearTurnBaseAnchor.test_agent_init_defines_turn_base_anchor::'\"_turn_base_usage_anchor\": None' in src",
+      "function_sha256": "9f83e05a0c6d12bc4d2922502561d714c95b390579ef171c7d802f413725f358",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/gateway/test_cron_interrupt_notification.py::TestDeliveryErrorIsRecordedWhenTheNoticeCannotBeSent.test_interrupted_run_records_delivery_error_without_mark_job_run::'_consume_interrupted_flag(' in body_src",
+      "function_sha256": "8cf780e7ca37073892cef04a680267e62ed3d755ab9d909028e99465b763b52e",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/gateway/test_cron_interrupt_notification.py::TestDeliveryErrorIsRecordedWhenTheNoticeCannotBeSent.test_interrupted_run_records_delivery_error_without_mark_job_run::'_finish_interrupted_run(' in body_src",
+      "function_sha256": "8cf780e7ca37073892cef04a680267e62ed3d755ab9d909028e99465b763b52e",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/gateway/test_cron_interrupt_notification.py::TestDeliveryErrorIsRecordedWhenTheNoticeCannotBeSent.test_interrupted_run_records_delivery_error_without_mark_job_run::'if delivery_error:' in src",
+      "function_sha256": "8cf780e7ca37073892cef04a680267e62ed3d755ab9d909028e99465b763b52e",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/gateway/test_cron_interrupt_notification.py::TestDeliveryErrorIsRecordedWhenTheNoticeCannotBeSent.test_interrupted_run_records_delivery_error_without_mark_job_run::'update_job(job[\"id\"], {\"last_delivery_error\": delivery_error})' in src",
+      "function_sha256": "8cf780e7ca37073892cef04a680267e62ed3d755ab9d909028e99465b763b52e",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/gateway/test_startup_watchdog.py::TestProgressLease.test_repair_declares_lease::'report_startup_progress' in src",
+      "function_sha256": "5548ee7d1f0cfa8a20374eb2e8fc113bb9da2a4fdc1184fcd8fe6213b5c3cb36",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/gateway/test_startup_watchdog.py::TestProgressLease.test_schema_init_declares_lease::'report_startup_progress' in src",
+      "function_sha256": "ed4e0e0edd778e867f8cabb1bf5ff8c82e51ec9d9891197169b37f48339de2af",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/gateway/test_stream_final_adoption_gate.py::TestGateWiring.test_run_py_gate_matches_contract::'not result.get(\"interrupted\")' in window",
+      "function_sha256": "f65a8c16a81d874acaaff2c4ed3fcf711d8ef7bea00bd5646ea0dfd6303ea04f",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/gateway/test_stream_final_adoption_gate.py::TestGateWiring.test_run_py_gate_matches_contract::'result.get(\"completed\") is not False' in window",
+      "function_sha256": "f65a8c16a81d874acaaff2c4ed3fcf711d8ef7bea00bd5646ea0dfd6303ea04f",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/gateway/test_telegram_prune_stale_topic_binding.py::TestThreadNotFoundFallbackSitesPruneBinding.test_control_message_helper_calls_prune::'_prune_stale_dm_topic_binding' in src",
+      "function_sha256": "2d62b1873e7f42ef28da55d104455196210ef1ce8e0ef131695c8c1071f255c0",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/gateway/test_telegram_prune_stale_topic_binding.py::TestThreadNotFoundFallbackSitesPruneBinding.test_streaming_send_fallback_calls_prune::'_prune_stale_dm_topic_binding' in window",
+      "function_sha256": "c895ce33bbeaa405bf10d2e422a729c10209148612f15ae977eb08c7a7ca5092",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/gateway/test_transcript_read_failure.py::TestSlashCommandsOnUnreadableTranscript.test_every_transcript_reading_handler_catches_the_error::'except TranscriptReadError' in window",
+      "function_sha256": "bed960185a9d1216d7ed651d8dd8cc2824e4399e85ba67c820ffd7a9c70fc2c3",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_cli_active_agent_ref_wiring.py::test_mixin_does_not_use_bare_global_for_active_agent_ref::'_active_agent_ref = self.agent' in src",
+      "function_sha256": "851fa71b9b26fbde8c15a203885e3b3821bca67f8400727e407dbf88854d3321",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_cli_active_agent_ref_wiring.py::test_mixin_does_not_use_bare_global_for_active_agent_ref::'_cli._active_agent_ref = self.agent' in src",
+      "function_sha256": "851fa71b9b26fbde8c15a203885e3b3821bca67f8400727e407dbf88854d3321",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_cli_goal_interrupt.py::TestInterruptFlagLifecycle.test_chat_resets_flag_at_entry::'self._last_turn_interrupted = False' in head",
+      "function_sha256": "89311f7152b669cee6924155c717035661f3ca08f8356b0b9f9a7fab5387ac11",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_cli_quiet_stdout_leak.py::test_quiet_branch_clears_inline_diff_callbacks::attr in branch",
+      "function_sha256": "49d0033d49aadb9ddb03b7676e3cb13b950f321811bd129da4a2bff31c3ca691",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_cli_quiet_stdout_leak.py::test_quiet_branch_clears_reasoning_callback::'cli.agent.reasoning_callback = None' in branch",
+      "function_sha256": "36141943d1a24cea5a02502f3b98a85903c40a928eccedc5d0e7e8de50d9c993",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_cli_quiet_stdout_leak.py::test_quiet_branch_clears_tool_progress_callback::'cli.agent.tool_progress_callback = None' in branch",
+      "function_sha256": "3acdcfece7cd1ad6cfe331a903be634746c18f926c095557aea6918525cf4763",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_cli_quiet_stdout_leak.py::test_quiet_branch_neutralizations_precede_run_conversation::'_configure_quiet_agent(cli.agent)' in branch",
+      "function_sha256": "adb78478a85060648c45775bc45fb91a8584c1a468abcf796d22f6931a0bd0d9",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_cli_quiet_stdout_leak.py::test_quiet_branch_neutralizations_precede_run_conversation::'run_conversation(' in inspect.getsource(cli_mod._run_quiet_single_query)",
+      "function_sha256": "adb78478a85060648c45775bc45fb91a8584c1a468abcf796d22f6931a0bd0d9",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_cli_quiet_stdout_leak.py::test_quiet_branch_syncs_tool_progress_off_to_agent::'cli.agent.tool_progress_mode = \"off\"' in branch",
+      "function_sha256": "057e683883b7bf2ec8973bbc7b9e10074776f9a1af8a57659a8ef9048386b846",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_in_dir_msys_paths.py::TestInDirMsysResolution.test_main_call_site_uses_translation::'_msys_to_windows_path' in block",
+      "function_sha256": "7050fb62c67de737b834e56cc51c64210572c88efc98c4d05a323d894f547596",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_single_query_clarify.py::test_agent_construction_gates_clarify_callback_on_single_query_mode::\"'_single_query_mode'\" in init_agent_src",
+      "function_sha256": "595e6036ce15907e01162b65f360ad3299619d4f6a77df7e824edd82c16779fb",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_single_query_clarify.py::test_agent_construction_gates_clarify_callback_on_single_query_mode::'\"_single_query_mode\"' in init_agent_src",
+      "function_sha256": "595e6036ce15907e01162b65f360ad3299619d4f6a77df7e824edd82c16779fb",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_single_query_clarify.py::test_agent_construction_gates_clarify_callback_on_single_query_mode::'_single_query_clarify_callback' in src",
+      "function_sha256": "595e6036ce15907e01162b65f360ad3299619d4f6a77df7e824edd82c16779fb",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_single_query_clarify.py::test_agent_construction_gates_clarify_callback_on_single_query_mode::'clarify_callback=' in init_agent_src",
+      "function_sha256": "595e6036ce15907e01162b65f360ad3299619d4f6a77df7e824edd82c16779fb",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_sqlite3_cli_salvage_gate.py::TestGuidanceNeverNamesLiveDb.test_forensic_backup_refusals_name_safe_lane::'--inspect-only' in body",
+      "function_sha256": "3dcc41c0d6201d98bdd600d9face488252de41dfca71e2fe818953c898c77816",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_sqlite3_cli_salvage_gate.py::TestGuidanceNeverNamesLiveDb.test_forensic_backup_refusals_name_safe_lane::'sessions recover --source' in body",
+      "function_sha256": "3dcc41c0d6201d98bdd600d9face488252de41dfca71e2fe818953c898c77816",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_sqlite3_cli_salvage_gate.py::TestGuidanceNeverNamesLiveDb.test_gateway_corruption_banner::'--inspect-only' in body",
+      "function_sha256": "f2c97a667b739bb2c34bed7b8968421dc89975decf050cbaaebc772a692a58ed",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_sqlite3_cli_salvage_gate.py::TestGuidanceNeverNamesLiveDb.test_gateway_corruption_banner::'--output' in body",
+      "function_sha256": "f2c97a667b739bb2c34bed7b8968421dc89975decf050cbaaebc772a692a58ed",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_sqlite3_cli_salvage_gate.py::TestGuidanceNeverNamesLiveDb.test_gateway_corruption_banner::'do NOT' in body",
+      "function_sha256": "f2c97a667b739bb2c34bed7b8968421dc89975decf050cbaaebc772a692a58ed",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_sqlite3_cli_salvage_gate.py::TestGuidanceNeverNamesLiveDb.test_gateway_corruption_banner::'sessions recover --source' in body",
+      "function_sha256": "f2c97a667b739bb2c34bed7b8968421dc89975decf050cbaaebc772a692a58ed",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_sqlite3_cli_salvage_gate.py::TestGuidanceNeverNamesLiveDb.test_kanban_manual_recovery_warns_about_live_db::'copy kanban.db aside FIRST' in source",
+      "function_sha256": "b75d88cf0b0bb4da23f3a9151140d44c7ebe7181e982c34cc774e8511ea9ad3f",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_update_apply_shallow_count.py::test_source_matches_exercised_logic::'_github_compare_behind' in src",
+      "function_sha256": "1e849544141ef2b7f38eb68c69501972b85ebc45a5c50dfcf5e3e20853ad3c53",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_update_apply_shallow_count.py::test_source_matches_exercised_logic::'apply_is_shallow' in src",
+      "function_sha256": "1e849544141ef2b7f38eb68c69501972b85ebc45a5c50dfcf5e3e20853ad3c53",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_update_apply_shallow_count.py::test_source_matches_exercised_logic::'commit count unknown on this shallow checkout' in inspect.getsource(update_cmd._cmd_update_impl)",
+      "function_sha256": "1e849544141ef2b7f38eb68c69501972b85ebc45a5c50dfcf5e3e20853ad3c53",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_update_fleet_check_fail_closed.py::TestCallSiteWiring.test_settle_sleep_gated_on_expected_runtimes::'_fleet_rows_expected = _m()._fleet_probe_expected_runtimes(' in src",
+      "function_sha256": "e074b2af866f928c401e8e2d51da159cc37539a13292a03d8af56f3d248cd09c",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_update_fleet_check_fail_closed.py::TestCallSiteWiring.test_settle_sleep_gated_on_expected_runtimes::'_fleet_snapshot = _collect_fleet_snapshot(restart, _fleet_rows_expected)' in src",
+      "function_sha256": "e074b2af866f928c401e8e2d51da159cc37539a13292a03d8af56f3d248cd09c",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_update_fleet_check_fail_closed.py::TestCallSiteWiring.test_settle_sleep_gated_on_expected_runtimes::'_time.sleep(2.0)' in snap_src",
+      "function_sha256": "e074b2af866f928c401e8e2d51da159cc37539a13292a03d8af56f3d248cd09c",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_update_fleet_check_fail_closed.py::TestCallSiteWiring.test_settle_sleep_gated_on_expected_runtimes::'if not rows_expected:\\n' in snap_src",
+      "function_sha256": "e074b2af866f928c401e8e2d51da159cc37539a13292a03d8af56f3d248cd09c",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_update_fleet_check_fail_closed.py::TestCallSiteWiring.test_zero_row_guard_gated_on_expected_runtimes::'elif not _fleet_snapshot and _fleet_rows_expected:' in src",
+      "function_sha256": "49b40eb0a1a313e36b3d40fb14d79b4fa707118f492b6dc1a447c8b714ec4f60",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_update_self_lock.py::test_pre_fetch_flow_has_no_self_lock_preflight::'_m()._abort_dependency_sync_if_self_locked' in sync_src",
+      "function_sha256": "4914ff725a73ab4e4dfb480812346e4878d3eb97fdc8928aaf1bff0aabfec9b4",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_update_self_lock.py::test_pre_fetch_flow_has_no_self_lock_preflight::'_sync_python_dependencies_after_pull(' in post_fetch",
+      "function_sha256": "4914ff725a73ab4e4dfb480812346e4878d3eb97fdc8928aaf1bff0aabfec9b4",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_update_self_lock.py::test_zip_update_guards_dependency_sync::'_abort_dependency_sync_if_self_locked' in src[:swap_idx]",
+      "function_sha256": "9634c0d35f09334b67edeed6c57c69cf963815643f64ddd329b8dd73fe40385c",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_cli/test_update_zip_fallback_guards.py::test_swap_preserve_set_is_the_module_constant::'_ZIP_PRESERVED_TOP_LEVEL' in src",
+      "function_sha256": "b7a7826c398fcc8828a63a2e5b41e1ef87f42743d883593f4b86bafdc438226f",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_state/test_replace_messages_archive_siblings.py::TestAcpPersistPreservesArchives.test_persist_source_has_no_failopen_probe::'active_only=True' in src",
+      "function_sha256": "311136f5fea0bb26023fa24e007011c30208703d590e32c29f49853dd412ced4",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/hermes_state/test_replace_messages_archive_siblings.py::TestTuiPromptTruncationPreservesArchives.test_truncation_source_uses_active_only::'active_only=True' in call",
+      "function_sha256": "830e44acd292c5195ceb7d893da581904c4013afd8daec2d71dfdba6bc226c2b",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/plugins/model_providers/test_commandcode_profile.py::TestCommandCodeModelFiltering.test_anthropic_profile_filters_to_claude::'\"claude-\" in m' in source",
+      "function_sha256": "71352eeaabf1f87d9ae3dee4c0cd29a98f372bd89352c4b453af1f3e3942c556",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/plugins/model_providers/test_commandcode_profile.py::TestCommandCodeModelFiltering.test_anthropic_profile_filters_to_claude::'startswith(\"claude-\")' in source",
+      "function_sha256": "71352eeaabf1f87d9ae3dee4c0cd29a98f372bd89352c4b453af1f3e3942c556",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/tools/test_compaction_tool_refresh.py::TestCompactionWiring.test_commit_path_calls_helper_and_survives_failure::self.assertIn('try:', guard_window, 'refresh call must be exception-guarded')",
+      "function_sha256": "0a6b8a069b208bfc7214d6048f4519c1c7b5f2a5a0531d5f01af74aab729d599",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/tools/test_file_tools.py::TestSSHConfigWriteGateSingleQuery.test_gate_call_passes_single_query_deny_message::'pattern_key=\"ssh_config_write\"' in block",
+      "function_sha256": "3529c1faeb956d7750d23e798a48b2228e205def1341b79740cf1a5a46c9fa5d",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/tools/test_image_generate_schema.py::TestDynamicParamGating.test_handler_still_rejects_unadvertised_edit_with_teaching_error::self.assertIn('capable of image-to-image / editing', handler_src)",
+      "function_sha256": "08807cb45c4cdef0a9703f2fc473da08a38351b0b970aecd23baff0a9756d949",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/tools/test_image_generate_schema.py::TestDynamicParamGating.test_handler_still_rejects_unadvertised_edit_with_teaching_error::self.assertIn('omit image_url', handler_src)",
+      "function_sha256": "08807cb45c4cdef0a9703f2fc473da08a38351b0b970aecd23baff0a9756d949",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/tools/test_mcp_stdio_children_dead.py::test_watch_ok_probe_does_not_create_unawaited_coroutine::'iscoroutinefunction(_watch_children)' in src",
+      "function_sha256": "98f321208584aa4db3b4a9826935d87af1fdca54b1b8ccf51ba1b635c8ef4502",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/tools/test_read_file_schema_gating.py::TestReadFileSchemaStatic.test_coverage_warning_teaching_left_to_the_warning::self.assertIn('NEEDS OCR', src)",
+      "function_sha256": "8977107b45d5613cd6797bd752cb6ff236ade4462a52615d5143d316d31a27de",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/tools/test_read_file_schema_gating.py::TestReadFileSchemaStatic.test_coverage_warning_teaching_left_to_the_warning::self.assertIn('pdftoppm', src)",
+      "function_sha256": "8977107b45d5613cd6797bd752cb6ff236ade4462a52615d5143d316d31a27de",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/tools/test_read_file_schema_gating.py::TestReadFileSchemaStatic.test_coverage_warning_teaching_left_to_the_warning::self.assertIn('vision_analyze', src)",
+      "function_sha256": "8977107b45d5613cd6797bd752cb6ff236ade4462a52615d5143d316d31a27de",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/tools/test_terminal_config_env_sync.py::test_docker_snap_compat_is_bridged_everywhere::'TERMINAL_DOCKER_SNAP_COMPAT' in _terminal_tool_env_var_names()",
+      "function_sha256": "d4ed704cff96c5ed7138f78ba5681b2d47f9230f647f86c2acfea568cee59efb",
+      "unchanged_upstream_function": true
+    },
+    {
+      "key": "tests/tui_gateway/test_cold_start_gil_stall.py::test_handle_ws_ready_payload_wires_skin_through_to_thread::'to_thread(server.resolve_skin)' in source",
+      "function_sha256": "a4c03b663a2beb69822c729ef5bea138c60d29b52448a7e582003c43afb0baa0",
+      "unchanged_upstream_function": true
+    }
+  ]
+}
