@@ -828,6 +828,19 @@ def _reclaim_dead_workers(conn: sqlite3.Connection) -> _CrashSweep:
             dead = _classify_dead_worker(pid, row["claim_lock"])
             retry_status = _kb._retry_status_for_run(conn, row["id"])
             dead.event_payload["retry_status"] = retry_status
+            try:
+                from hermes_cli.kanban_crash_evidence import _capture_crash_artifact
+                evidence = _capture_crash_artifact(
+                    conn, row["id"], worker_pid=pid, claim_lock=row["claim_lock"],
+                    exit_kind=dead.kind, exit_code=dead.code, error_text=dead.error_text,
+                    event_kind=dead.event_kind,
+                )
+            except Exception:
+                evidence = None
+            if evidence:
+                dead.event_payload.update(evidence_path=evidence["path"], classification=evidence["classification"])
+                if evidence["alive_sidecar_pids"]:
+                    dead.event_payload["alive_sidecar_pids"] = list(evidence["alive_sidecar_pids"])
             cur = conn.execute(
                 "UPDATE tasks SET status = ?, claim_lock = NULL, "
                 "claim_expires = NULL, worker_pid = NULL "
@@ -2329,6 +2342,7 @@ def run_daemon(
     interval: float = 60.0,
     max_spawn: Optional[int] = None,
     failure_limit: int = DEFAULT_FAILURE_LIMIT,
+    ttl_seconds: Optional[int] = None,
     stop_event=None,
     on_tick=None,
 ) -> None:
@@ -2342,6 +2356,8 @@ def run_daemon(
     """
     import threading
 
+    if ttl_seconds is None:
+        ttl_seconds = _kb.DEFAULT_CLAIM_TTL_SECONDS
     if stop_event is None:
         stop_event = threading.Event()
 
@@ -2368,6 +2384,7 @@ def run_daemon(
                     max_spawn=max_spawn,
                     max_in_progress=max_in_progress,
                     failure_limit=failure_limit,
+                    ttl_seconds=ttl_seconds,
                 )
             if on_tick is not None:
                 with contextlib.suppress(Exception):

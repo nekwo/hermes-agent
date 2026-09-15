@@ -88,6 +88,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             max_spawn=max_spawn,
             max_in_progress=max_in_progress,
             failure_limit=getattr(args, "failure_limit", kbd.DEFAULT_FAILURE_LIMIT),
+            ttl_seconds=getattr(args, "claim_ttl", kb.DEFAULT_CLAIM_TTL_SECONDS),
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
         )
@@ -234,6 +235,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
             interval=args.interval,
             max_spawn=args.max,
             failure_limit=getattr(args, "failure_limit", kbd.DEFAULT_FAILURE_LIMIT),
+            ttl_seconds=getattr(args, "claim_ttl", kb.DEFAULT_CLAIM_TTL_SECONDS),
             on_tick=_on_tick,
         )
     finally:

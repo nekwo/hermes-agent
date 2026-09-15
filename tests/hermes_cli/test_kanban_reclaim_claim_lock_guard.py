@@ -16,6 +16,7 @@ computed for.
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -53,7 +54,7 @@ def test_stale_crash_reset_rejected_for_reclaimed_task(conn):
 
     # Worker A claims, then dies.
     kb.claim_task(conn, tid, claimer=f"{host}:A")
-    dead = subprocess.Popen(["true"])
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
     dead.wait()
     kbd._set_worker_pid(conn, tid, dead.pid)
     old = conn.execute(
@@ -68,7 +69,9 @@ def test_stale_crash_reset_rejected_for_reclaimed_task(conn):
     )
     conn.commit()
     kb.claim_task(conn, tid, claimer=f"{host}:B")
-    sleeper = subprocess.Popen(["sleep", "30"])
+    sleeper = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"]
+    )
     try:
         kbd._set_worker_pid(conn, tid, sleeper.pid)
 
@@ -98,7 +101,7 @@ def test_genuine_crash_still_reclaims(conn):
     host = kb._claimer_id().split(":", 1)[0]
     tid = kb.create_task(conn, title="legit", assignee="w")
     kb.claim_task(conn, tid, claimer=f"{host}:A")
-    dead = subprocess.Popen(["true"])
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
     dead.wait()
     kbd._set_worker_pid(conn, tid, dead.pid)
     # Rewind started_at so the launch grace window doesn't skip the check.

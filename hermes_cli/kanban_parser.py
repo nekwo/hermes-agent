@@ -339,6 +339,7 @@ _SPECS = [
     ], help="Archive one or more tasks"),
     _cmd("tail", [_TASK_ID, _arg("--interval", type=float, default=1.0)], help="Follow a task's event stream"),
     _cmd("dispatch", [
+        _arg("--claim-ttl", type=int, default=kb.DEFAULT_CLAIM_TTL_SECONDS, help="Claim lifetime in seconds"),
         _arg("--dry-run", action="store_true", help="Don't actually spawn processes; just print what would happen"),
         _arg("--max", type=int, help="Cap number of spawns this pass"),
         _arg("--failure-limit", type=int, default=kbd.DEFAULT_FAILURE_LIMIT,
@@ -347,6 +348,7 @@ _SPECS = [
         _json_flag(),
     ], help="One dispatcher pass: reclaim stale, promote ready, spawn workers"),
     _cmd("daemon", [
+        _arg("--claim-ttl", type=int, default=kb.DEFAULT_CLAIM_TTL_SECONDS),
         _arg("--interval", type=float, default=60.0, help="Seconds between dispatch ticks (default: 60)"),
         _arg("--max", type=int, help="Cap number of spawns per tick"),
         _arg("--failure-limit", type=int, default=kbd.DEFAULT_FAILURE_LIMIT),

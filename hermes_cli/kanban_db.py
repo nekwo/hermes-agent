@@ -4210,3 +4210,23 @@ def __getattr__(name):  # PEP 562 — lazy so no import cycles
     warn_once(__name__, name, *target)
     return getattr(importlib.import_module(target[0]), target[1])
 # ---- END PLUGIN-COMPAT ----
+
+# Downstream evidence API retained for existing dashboards and tests.
+from hermes_cli.kanban_crash_evidence import (
+    _CRASH_TAIL_BYTES,
+    _CRASH_SIDECAR_MAX,
+    _CRASH_SIDECAR_FILE_MAX_BYTES,
+    _CRASH_LOG_GROWING_WINDOW_SECONDS,
+    _REDACTION_MARK,
+    _build_redaction_patterns,
+    _REDACTION_PATTERNS,
+    _redact_secrets,
+    _tail_bytes_redacted,
+    _candidate_sidecar_dirs,
+    _parse_sidecar_manifest,
+    _discover_sidecars,
+    _crashes_dir,
+    _build_crash_artifact,
+    _write_crash_artifact,
+    _capture_crash_artifact,
+)

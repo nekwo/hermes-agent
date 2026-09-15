@@ -45,7 +45,9 @@ def test_dashboard_not_running_by_default(
 # auto-injection bug. Pre-fix, the s6 run script appended `--insecure`
 # whenever `HERMES_DASHBOARD_HOST` was non-loopback, silently disabling
 # the OAuth gate on every container-deployed dashboard. The matching
-# static-text guard lives in tests/test_docker_home_override_scripts.py;
+# static-text guard lives in tests/docker/test_home_override_scripts.py
+# (this comment said tests/test_docker_home_override_scripts.py, which has
+# never existed -- repointed MCF-78 2026-08-20);
 # this is the behavioural end-to-end check.
 # ---------------------------------------------------------------------------
 
