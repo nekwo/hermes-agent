@@ -1,3 +1,5 @@
+> Delivery completed: Hermes main is `c112a9347a4e14ce573cdbf3d154177a6f521843`. See [stage 24](integration-stage24.md). Installer remains proposed; historical candidate observations below are retained with that status.
+
 # Local llama installer handoff after upstream integration
 
 Status: **proposed, not fixture-frozen**. Candidate backend `567770b10dddcc5ff48019a932432f71bbaf156d` combines original `34ad8ba33f2508ab10bb24a26f0377ddb62660cb` and upstream `110baa095bc7135a0624557a9cc35df0f98ece0f`. Final delivery status belongs to the latest integration checkpoint. No installer implementation, Launcher integration, live restart or runtime configuration change.

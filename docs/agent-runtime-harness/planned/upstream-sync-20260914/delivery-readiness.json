@@ -1,19 +1,21 @@
 {
   "original": "34ad8ba33f2508ab10bb24a26f0377ddb62660cb",
   "upstream": "110baa095bc7135a0624557a9cc35df0f98ece0f",
-  "candidate_code_tip": "b547f783a85a456c3e269b80936c4e85d5c7144a",
-  "candidate_tree": "a16b9374ae64674ed193d852e2be4edd9593907c",
+  "candidate_code_tip": "c112a9347a4e14ce573cdbf3d154177a6f521843",
+  "candidate_tree": "b533fff1abaa2289abc90d4664c07f421e00de19",
   "consolidated": "5104732788a545579aa8498f211467a55679b9e8",
   "original_tree": "5f5a34ad214d695f5c889a0798e220d175cc91ad",
   "consolidated_tree": "5f5a34ad214d695f5c889a0798e220d175cc91ad",
   "tree_equivalence_diff_exit": 0,
   "original_and_upstream_ancestors": true,
   "unmerged_paths": 0,
-  "main": "34ad8ba33f2508ab10bb24a26f0377ddb62660cb",
-  "origin_main": "34ad8ba33f2508ab10bb24a26f0377ddb62660cb",
-  "main_updated": false,
-  "delivery_blocker": "Running Hermes serve PID 33896 uses managed venv editable mapping agent/hermes_cli/run_agent -> X:/Eternia/hermes-agent. Do not change live checkout until authorized maintenance window.",
-  "worktrees": [
+  "main": "c112a9347a4e14ce573cdbf3d154177a6f521843",
+  "origin_main": "c112a9347a4e14ce573cdbf3d154177a6f521843",
+  "main_updated": true,
+  "delivery_blocker": null,
+  "latest_checkpoint": "integration-stage24.md",
+  "final_proof": "final-proof.json",
+  "historical_worktree_snapshot": [
     {
       "path": "X:/Eternia/hermes-agent",
       "head": "34ad8ba33f2508ab10bb24a26f0377ddb62660cb",

@@ -1,16 +1,15 @@
-> Latest: [checkpoint 13](integration-stage13.md). Launcher updater protection is on main. Hermes remains an unlanded candidate with regression checks still in progress; earlier completeness statements are superseded. The live service still imports the primary checkout.
+> Current delivery: [stage 24](integration-stage24.md), [final proof](final-proof.json). Hermes and Launcher main are synchronized with origin. Alice restarted successfully on the patched runtime; configuration hashes are unchanged. The fresh automatic full CI run is pending. [Stage 23](integration-stage23.md) records the completed broad run and passing focused repairs. Earlier status statements below are historical inventory context.
 
 # Hermes upstream synchronization checkpoint — 2026-09-14
 
-Status: inventory and recovery checkpoint; upstream integration is NOT validated
-or landed. This report does not authorize replacing published main.
+Historical inventory snapshot follows. Current delivery and verification are recorded in stage 24; published history was preserved.
 
 Navigation: [verification and exact commands](verification.md),
 [installer handoff](installer-handoff.md),
 [all original-to-review commit mappings](original-to-consolidated.csv),
-[unresolved conflict ledger](conflict-ledger.csv).
+[original conflict ledger](conflict-ledger.csv).
 
-Final checkpoint: original main and origin/main still match at `34ad8ba33f`;
+Initial checkpoint (historical): original main and origin/main matched at `34ad8ba33f`;
 all nine pre-existing worktree heads and porcelain statuses are unchanged
 (`worktree-preservation.json`). The bounded review tip is `5104732788`, with
 the exact original tracked tree. 394 baseline tests passed with one retry, and

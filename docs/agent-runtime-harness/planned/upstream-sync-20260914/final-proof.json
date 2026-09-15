@@ -1,0 +1,56 @@
+{
+  "delivered": "c112a9347a4e14ce573cdbf3d154177a6f521843",
+  "original": "34ad8ba33f2508ab10bb24a26f0377ddb62660cb",
+  "upstream": "110baa095bc7135a0624557a9cc35df0f98ece0f",
+  "review": "5104732788a545579aa8498f211467a55679b9e8",
+  "original_and_review_tree": "5f5a34ad214d695f5c889a0798e220d175cc91ad",
+  "launcher_main": "241391dd66a55d4375fee81609c9195d8240c1b7",
+  "runtime": {
+    "at_unix": 1789513612.6083846,
+    "main": "c112a9347a4e14ce573cdbf3d154177a6f521843",
+    "python": "3.12.14 (main, Sep  1 2026, 14:17:39) [MSC v.1944 64 bit (AMD64)]",
+    "sqlite": "3.53.1",
+    "hermes": "0.21.3",
+    "config_sha256": {
+      "X:\\Eternia\\.hermes\\config.yaml": "75638b3556997ad44ebdf19932c8d92f69c0a6be362afdb00a8fb1b10d195dc2",
+      "X:\\Eternia\\.hermes\\profiles\\alice\\config.yaml": "d7607a2bb011eb1fcf9aabc09f6d933a2ca1f6df06aa74f6bca86af083a1e678"
+    },
+    "gateway_pid": 33636,
+    "gateway_updated_at": "2026-09-15T23:05:49.976469+00:00",
+    "telegram": "connected",
+    "telegram_writer_pid": 33636,
+    "active_agents": 0,
+    "backup": "X:\\Eternia\\.hermes\\backups\\upstream-sync-20260915",
+    "launcher_restarted": false
+  },
+  "ci_full_baseline": {
+    "run": 35028303037,
+    "passed": 59007,
+    "failed": 3,
+    "skipped": 540,
+    "additional_file_timeout": "tests/agent_runtime/test_tombstone_registry.py"
+  },
+  "final_focused": {
+    "linux_four_files_passed": 1177,
+    "windows_tombstone_passed": 1157,
+    "windows_other_three_files_passed": 20
+  },
+  "fresh_main_ci": {
+    "run": 35034006672,
+    "status_at_checkpoint": "pending; not used as a claimed full pass"
+  },
+  "artifact_sha256": {
+    "python-ci-9caca-complete.log": "827d4815a45f10645bb6500fcbee2c402f4bccb2da6b8037584db34571ce1112",
+    "windows-ci-9caca.log": "a4704f134bba1c8d31dada05b1cab279ba0417af9bdda624b77b588274b61be4",
+    "linux-final-ci-repair-v2.log": "6886fa11a3d860d94bd9992f9ff53170d1915950ec95a1ced1bbee37c4a95c41",
+    "final-tombstone-windows.log": "0278e0073ef3a7c20b1fe08a65f28f9bcb18feb7117686e1e3d3b136d47bfdb2",
+    "final-ci-repair-focused-v2.log": "f49502d592eb0e3194a6e0d9539d10c0556e15fca062cdfd9ce9f1a93e268f76",
+    "isolated-config-qualification.log": "1883dea40c4d43e9cd05e69d88c0eee1cf88c2652e7c0cf0326e52e5ee948915",
+    "live-venv-backup-verification.json": "a6113494dfff56550882fac90de915529b9c57d9d408c0305783d87a606ae561",
+    "maintenance-stop.log": "374314c557ae101ca4636c9c301b8ab4d7a82fc2eabef6aea1c4a3037bb0e2ec",
+    "maintenance-start.log": "893fea77338e3f2f818e8c07650e0db18b4de8aa40425c1624fe07d58bd51660",
+    "maintenance-dependency-refresh.log": "d44f7c36d6476b2c4e6f00d3d047b12bc9dc0860d7446d3a1a9c214acb968631",
+    "maintenance-receipt.json": "8df48dd43d2ce16a1eccafc2285b659c36dc6c76042c997495f2a78a4844b328",
+    "patched-real-llama.log": "367454021eefdf8c0f95cfc877ef854b33fe1302f0675c28f6b8d55a7477310f"
+  }
+}
