@@ -1,0 +1,267 @@
+---
+name: harness-runtime-model
+description: Hermes Agent Runtime mental model AND the operating manual for Mission Control — personas / instances / chats / graph / board / office, the first-class commands to view and operate them, helper delegation without context bloat, and (in references/) the live operating loop: place-message-delete a QA instance, read MCP admission receipts, triage stalled turns, capture Stage C proof, preserve evidence. Use instead of low-level DB/Python/scripts.
+metadata:
+  hermes:
+    surfaces: [mission_chat]
+    modes: [standard]
+    load_policy: required_preload
+---
+
+# Harness Runtime Model
+
+**Chat is the only lane.** There is no goal, task, mission plan, stage graph, daemon,
+worker, run, proof gate, lane, or swarm certification. Those were removed on
+2026-07-30; if you remember them, that memory is stale. A request arrives as a chat
+turn on an existing persona instance, you do the work with your own tools in that
+turn, and you answer in that same chat. Nothing dispatches you, and nothing gates
+your reply.
+
+**Model:** **persona** = a profile-backed agent definition (data, in the Hermes
+profile — not hardcoded). **persona instance** = a durable placement of that persona
+(`personainst_<role>_agent_<hash>`). **chat session** = the durable root a turn runs
+on; an instance points at one operator-chat root and can hold several. Roles are
+data too: an unknown role is carried, not rejected, and never filters your tools.
+
+**The runtime agent graph is a picture, not a program.** `flow_graph.py` stores one
+operator-authored document per owner (`graph_id: runtime:<owner>`) and reconciles
+`persona_instances[].steered_by` from it. The Agent Console renders that as the
+steering tree. It records *who steers whom*; **it enforces nothing, routes nothing,
+and picks no next agent.** Never answer "what runs next?" from it — nothing runs
+next. It only ever references instances that already exist; it never creates them
+and never binds work.
+
+**Two messaging paths, and only two:** `mission-chat message` (the canonical
+operator/CLI path) and the in-model `agent_chat_send` tool (agent → agent). If you
+want another agent to do something, message it; there is no assignment surface.
+
+**The Mission Board is planning state only.** Cards record follow-up work for humans
+to read. A card never starts, routes, or changes anything.
+
+`hermes` == `python -m hermes_cli.main`. There is no `hermes harness runtime`
+command. Always `--json`. Never use raw DB / Python / ad-hoc scripts to inspect.
+
+## Operating loop — load the reference that matches the task
+
+This package absorbed `mission-control-harness` (2026-08-28); it is now the whole
+operator manual. This file is the preloaded model. The operating detail is in
+`references/`, loaded on demand — read the one that matches BEFORE acting:
+
+- `references/operations.md` — **the operating loop.** Roots and the `base` vs `alice`
+  home caveat, the start checklist, the extra inspect/operate rows this file does not
+  carry, the fresh-instance-per-QA-task recipe (create · office write · message ·
+  delete), the delete lane, MCP admission receipts, stalled-turn triage, evidence
+  preservation, and the final report shape. Read it before operating anything live.
+- `references/persona-chat.md` — operator-channel behavior, the canonical new-chat
+  contract, identity/latency/turn-identity rules, agent-to-agent `agent_chat_send`
+  and the relay policy. Read before persona-chat / operator-channel / bridge work.
+- `references/proof.md` — Backend and Launcher proof commands, the Stage C MCP
+  visual-proof recipe, and its known hazards. Read before attaching or judging proof.
+- `references/debugging.md` — the snapshot parity envelope, UI⟷harness divergence
+  classes, the MC/UI checklist. Read when the UI disagrees with harness truth.
+
+## The work contracts — load by role and order size
+
+This package is how to OPERATE the runtime. The work itself has its own
+contracts — separate skills, loaded to match the work, never folded in here:
+
+- `harness-dev-delivery` — the ALWAYS-ON contract for every dev chat turn,
+  one-line fix included: repo discipline, focused self-tests, commit hygiene,
+  the cross-stack contract packet, honest reporting.
+- `staged-deep-audit-delivery` — the LOAD-ON-ORDER process for a staged,
+  multi-stage implementation order: the trigger checklist plus the
+  stage → docs → deep-audit → prove loop. It wraps dev-delivery's rules and
+  never replaces them.
+- `eternia-writing-plans` — the plan-document quality bar, when the
+  deliverable is an implementation-ready plan rather than code.
+- QA turns load `harness-qa-verdict` INSTEAD of the dev contract: evidence
+  discipline and the narrowest proof command. QA judges work; it never
+  patches code.
+
+## Non-negotiables
+
+- Do not trust an agent summary as proof, and never claim something works from code
+  inspection. Run it, and cite the receipt (tool-trace row, artifact path,
+  `client_message_id`/`turn_id`, `mcp_calls_spent`).
+- Check `.parity.runtime_root` and `.parity.profile` in `harness snapshot --json`
+  before believing anything. Roster/office/board/graph answers are home-independent;
+  **admission, model, and profile answers are not** — the launcher's serve child runs
+  under `profiles\base` or the persona's bound profile, not your CLI's `alice`. Say
+  which home produced any receipt you report (`references/operations.md`, "Roots").
+- Use first-class harness CLI verbs. Never inspect or mutate runtime state with raw
+  DB access, ad-hoc Python, or hand-editing store files.
+- **Archive-never-delete**, including the verb named `delete` (a full alias of
+  `retire`, which archives and preserves chat history). There is no hard-delete verb
+  to reach for.
+- Visual claims need Stage C proof captured through the MCP path in
+  `launcher-mcp-operations` — the only sanctioned one. If it is blocked, record the
+  exact blocker and still attach command/code proof. Never kill Tony's live Launcher.
+- Image lines pass through UNTOUCHED — reproduce every `MEDIA:<absolute image path>`
+  line, and every bare absolute screenshot path, VERBATIM on a line of its own, in
+  your own reports and in every relay, quote, and summary. Canonical rule:
+  `launcher-mcp-operations` SKILL.md, "Screenshot capture and delivery".
+- Never write raw secrets into SessionDB (recall-reachable). Do not overwrite
+  unrelated local changes.
+- If agents loop, stall, or take the wrong proof path, that is a Harness gap: name
+  the command, the typed error, and the missing receipt. "It hung" is not a report.
+
+## View
+
+| See | Command |
+|---|---|
+| runtime health / diagnostics | `hermes harness status --json` · `hermes harness doctor --json` |
+| configured agent definitions | `hermes harness agent list --json` |
+| durable persona instances (the roster) | `hermes harness persona list --json` |
+| one instance in detail | `hermes harness persona show <persona_instance_id> --json` |
+| an instance's resolved tools and blocks | `hermes harness persona tool-diff <persona_id> --json` |
+| a chat session's transcript | `hermes harness persona chat history --session-id <root> --json` |
+| stored agent-graph documents | `hermes harness flow list --json` · `hermes harness flow show <graph_id> --json` |
+| planning boards and cards | `hermes harness board list --json` · `hermes harness board show <board_id> --json` |
+| realms / workspaces | `hermes harness realm list --json` · `hermes harness workspace list --json` |
+| aggregate read-model (what the Launcher renders) | `hermes harness snapshot --json` |
+| shared skills substrate | `hermes harness skills inventory --json` · `skills catalog --json` |
+| level agents shown in Mission Control | Stage C MCP `mcp_launcher_qa_get_buttons` with `scope=mission_control.agent` |
+| compact Mission Control graph probe | Stage C MCP `mcp_launcher_qa_get_widget_state` with `widget=mission_control.graph` |
+
+**Do not use for level agents:** `status.agents` and `hermes harness agent list --json`
+rosters show configured/installed Harness agents. They do not show which instances are
+placed on a Mission Control level. Use `persona list --json` for the live roster and
+Stage C MCP `mission_control.agent` for the visible level-agent selection surface.
+
+## Removed — unlearn these
+
+These verbs, fields, and rules were removed on 2026-07-30. Do not reach for them, do not
+expect their output shapes, and do not repeat them to an operator as if they were live:
+
+- `hermes harness task show <id> --json`, `task list`, `task create --start-daemon`,
+  `task history`, `task unblock/cancel/archive` — there are no goals or tasks.
+- `hermes harness blueprint list/run --bind`, and the `.mission_plan` field on anything
+  (with its `.stages`, `.edges`, `.agent_topology`) — there is no stage graph. The old
+  default graph `neko_two_dev_default` = **Neko scope → Backend Dev → Launcher Dev**, and
+  the rule that **QA is a node only if the selected blueprint binds it**, are both gone:
+  no blueprint binds anyone, and QA is just another agent you can message.
+- `run show` / `proof list` / `worker list` / `lane list` / `swarm status|enable`, `tick`,
+  and `run-until-settled` — no runs, no proof gates, no worker sessions, no lanes, and no
+  burn-in certification gate.
+- The `mission_goal_create` tool and the `--allow-mission-goal` opt-in on `mission-chat
+  message` — no chat turn can create a goal, because there are no goals.
+
+`harness snapshot --json` is contract 54 and carries no goal, stage, run, proof, or
+incident sections. If you are looking for one, it is gone, not missing.
+
+## In-turn tools
+
+<!-- BEGIN GENERATED: harness_core inventory -->
+
+44 tools · generated from the registry by `scripts/emit_harness_tool_inventory.py` · do not edit by hand. If a tool exists for it, the tool is the answer; the full table with descriptions is `references/tool-inventory.md`.
+
+| toolset | tools | use it for |
+|---|---|---|
+| `agent_chat` | `agent_chat_dispatches` · `agent_chat_installs` · `agent_chat_log_path` · `agent_chat_open` · `agent_chat_send` · `agent_chat_threads` | teammates: list, message, read, dispatches, transcript path |
+| `board` | `board_card_add` · `board_cards` | record follow-up work — planning state only |
+| `clarify` | `clarify` | ask the operator a question mid-turn |
+| `delegation` | `delegate_task` | hand a bounded subtask to a helper with fresh context |
+| `terminal` | `process_manage` · `terminal` | run commands and manage background processes |
+| `file` | `patch` · `read_file` · `search_files` · `write_file` | read, write, patch and search files |
+| `web` | `web_extract` · `web_search` | search the web and pull a page's content |
+| `browser` | `browser_back` · `browser_click` · `browser_console` · `browser_get_images` · `browser_navigate` · `browser_press` · `browser_scroll` · `browser_snapshot` · `browser_type` · `browser_vault_enter_code` · `browser_vault_fill` · `browser_vault_list` · `browser_vault_save_login` · `browser_vault_unlock` · `browser_vision` | drive a real browser: navigate, click, type, read, screenshot |
+| `browser-cdp` | `browser_cdp` · `browser_dialog` | raw CDP and dialog handling for the same browser |
+| `skills` | `skill_manage` · `skill_search` · `skill_view` · `skills_list` | find, read and author skills |
+| `memory` | `memory` | durable profile memory |
+| `todo` | `todo_list` | your own in-turn checklist |
+| `session_search` | `session_search` | search your own past sessions |
+| `vision` | `vision_analyze` | analyze an image |
+| `code_execution` | `execute_code` | run code in the sandbox |
+
+<!-- END GENERATED: harness_core inventory -->
+
+## Operate
+
+**Tools first.** If a tool exists for the row, the tool IS the answer — it runs
+inside your turn, mints nothing, and costs no subprocess. A terminal call for a row
+that names a tool is a navigation failure: report it (the command you reached for,
+the tool you should have used) rather than quietly shelling out. The CLI column is
+for rows where no tool exists.
+
+| Do | In-turn tool (first choice) | CLI (only where no tool exists) |
+|---|---|---|
+| see who your teammates are / which instances you can reach | `agent_chat_threads` (read-only, no mint; `@install/…` reaches a far install) | — |
+| see which other installs (machines) you can reach, and who is on them | `agent_chat_installs` (read-only; `install=` fetches that install's roster) | the HUD's `Installs` line already names them — this is the fresh read |
+| message a teammate and get the reply in this turn | `agent_chat_send` (`wait=true`; `wait=false` to dispatch and continue) | `hermes harness mission-chat message …` is the OPERATOR's path, not yours |
+| read what a teammate said | `agent_chat_open` (tail; `@install/…` reads a far thread, `session_id` required there) · `agent_chat_log_path` (full transcript path, then `read_file` / `search_files`) | — |
+| see your background dispatches | `agent_chat_dispatches` | — |
+| track follow-up work | `board_card_add` · `board_cards` — planning state only | `hermes harness board card add …` (operator path) |
+| ask the operator a question | `clarify` | — |
+| hand a bounded subtask to a helper with fresh context | `delegate_task` | — |
+| continue an existing chat root | — | `hermes harness persona instance open-chat --persona-instance-id <instance> --persona <id> --session-id <root> --json` (`--session-id` is required unless `--new-session` or `--add-instance`) |
+| create a new server-minted chat on an existing instance | — | `hermes harness persona instance open-chat --persona-instance-id <instance> --persona <id> --new-session --idempotency-key <key> --json` |
+| find the on-level chat instances an OPERATOR can message | — | `hermes harness persona list --json` → chat-mode `personainst_<role>_agent_<hash>` rows (cross-check Stage C `mission_control.agent` buttons) |
+| steer an in-flight streamed turn | — | `hermes harness mission-chat steer --session-id <root> --client-message-id <id> --message … --json` |
+| abandon an outcome-unknown turn | — | `hermes harness mission-chat turn-resolve --session-id <root> --client-message-id <id> --turn-id <turn> --action abandon --json` |
+| load a skill on the next turn | — | `hermes harness mission-chat queue-skill --persona <id> --session-id <root> --skill <name> --json` |
+| re-route a steering edge in the agent graph | — | `hermes harness persona instance steer …` (supports multi-parent fan-in) |
+| replace a whole agent-graph document | — | `hermes harness flow set …` (reconciles `steered_by` for the instances it references; never creates instances) |
+| return a child's bounded summary to a parent chat | — | `hermes harness persona instance return-summary …` |
+
+The complete inventory with descriptions, and the list of verbs that genuinely have
+no tool, is `references/tool-inventory.md`.
+
+## Persona chat continuity
+
+**Message the on-level instance.** Persona instances and their chat roots use
+one chat lane. Legacy lifecycle metadata does not create a separate routing
+class and does not change whether an exact, owned chat root can receive a turn.
+
+`PersonaInstance.default_chat_session_id` is the operator-chat pointer. Hermes
+mints every new root; callers may use a local draft identity only while waiting
+for the `open-chat --new-session` result.
+
+The pointer can go stale: `mission-chat message` may reject a roster-listed
+root with `unknown_chat_session` ("unknown explicit persona chat root"). Do not
+keep retrying it — mint a fresh root with `open-chat --new-session
+--idempotency-key <key>` and message that. The roster and chat roots hang off
+the runtime ROOT, not the profile home: under the wrong store root,
+`persona list` returns an empty roster and chat roots resolve nowhere, while
+the wrong HOME gives you the right roster with the wrong profile answers
+(admission, model, auth) — measured 2026-08-28, see the Non-negotiables above
+and `references/operations.md`, "Roots".
+
+Treat `session_id` in chat commands as the stable root. Native compression may
+rotate `active_session_id`; it does not change the root selected by Mission
+Control. Runtime-state projections are observer-qualified: only the owning
+long-lived serve process may report `hot`, `busy`, `cold`, or `failed` from its
+resident registry; external CLI snapshots report `unknown`.
+
+If a turn returns `chat_turn_outcome_unknown`, do not retry it. Resolve the
+exact `(root, client_message_id, turn_id)` tuple with `turn-resolve ...
+--action abandon`, then send the text as a new turn with a fresh client
+message ID.
+
+`chat_turn_provider_refused` is the OPPOSITE fault and takes the opposite
+action: the model provider authored a definite "this did not run" (a plan quota
+wall, a rejected credential, a model the account cannot reach), so there is
+nothing to resolve and `turn-resolve` will refuse it. The frame carries a typed
+`provider_refusal: {status_code, reason, message, reset_at, resets_in_seconds,
+provider, model}` — read `reason`, never the prose — and the journal settles at
+`provider_refused`. Wait out the reset (or fix the credential) and send a NEW
+client message id.
+
+## Delegation — helpers without context bloat
+
+*(Absorbed `harness-continuity` 2026-08-28; full recipe and the return-summary
+flag set: `references/operations.md`, "Delegation".)*
+
+- Message exactly ONE helper at a time — `agent_chat_send` from inside a turn,
+  or `mission-chat message` against its chat root. A message is the whole
+  handoff: narrow objective, explicit stop condition, the parent session id.
+- **Never slurp.** Do not read or paste the helper's full transcript, raw
+  logs, or hidden reasoning into the parent. Carry pointers: the parent gets
+  one bounded summary plus artifact/proof refs, nothing more.
+- The first-class return is `persona instance return-summary` (Operate table
+  above): posts a redaction-safe bounded message into the parent session,
+  records lineage via `returned_to`, emits `steer.returned`. The summary is
+  hard-truncated and refs are capped — send pointers, not payload.
+- Progress is what the helper says in chat plus the artifacts it names (the
+  daemon/run-row `progress_peek` died 2026-07-30). Intervene only on a stall,
+  an explicit block, or scope drift — by another message on the SAME chat
+  root, so the helper keeps its context and prompt cache.

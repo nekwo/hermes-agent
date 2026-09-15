@@ -1,0 +1,23 @@
+▶ venv: /c/Users/beast/.venvs/hermes-test
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ real store root handed to the gateway fence: X:\Eternia\.hermes
+▶ pre-compiling bytecode cache
+▶ launching test runner
+Discovered 3 test files (~64 tests) under ['tests\\agent_runtime\\test_persona_set_model.py', 'tests\\test_provider_visibility_v2.py', 'tests\\run_agent\\test_compression_feasibility.py']; running with -j 1
+[ 59.4% |    38/~64 | ✓40 | ✗ 0] ✓ tests\agent_runtime\test_persona_set_model.py (40✓, 10.0s)
+[ 76.6% |    49/~64 | ✓51 | ✗ 0] ✓ tests\run_agent\test_compression_feasibility.py (11✓, 10.0s)
+[100.0% |    64/~64 | ✓67 | ✗ 0] ✓ tests\test_provider_visibility_v2.py (16✓, 12.8s)
+
+=== Summary: 3 files, 67 tests passed, 0 failed (100% complete) in 32.9s (1 workers) ===
+  Durations cached to test_durations.json (3 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   3
+  Total subprocess CPU-wall: 32.8s  (runner wall: 32.9s, parallelism: 1x)
+  P50: 10.05s  P90: 12.81s  P95: 12.81s  P99: 12.81s  Max: 12.81s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+     12.81s  tests\test_provider_visibility_v2.py
+     10.05s  tests\run_agent\test_compression_feasibility.py
+      9.99s  tests\agent_runtime\test_persona_set_model.py

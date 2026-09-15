@@ -1,0 +1,81 @@
+{
+  "original": "34ad8ba33f2508ab10bb24a26f0377ddb62660cb",
+  "upstream": "110baa095bc7135a0624557a9cc35df0f98ece0f",
+  "candidate_code_tip": "b547f783a85a456c3e269b80936c4e85d5c7144a",
+  "candidate_tree": "a16b9374ae64674ed193d852e2be4edd9593907c",
+  "consolidated": "5104732788a545579aa8498f211467a55679b9e8",
+  "original_tree": "5f5a34ad214d695f5c889a0798e220d175cc91ad",
+  "consolidated_tree": "5f5a34ad214d695f5c889a0798e220d175cc91ad",
+  "tree_equivalence_diff_exit": 0,
+  "original_and_upstream_ancestors": true,
+  "unmerged_paths": 0,
+  "main": "34ad8ba33f2508ab10bb24a26f0377ddb62660cb",
+  "origin_main": "34ad8ba33f2508ab10bb24a26f0377ddb62660cb",
+  "main_updated": false,
+  "delivery_blocker": "Running Hermes serve PID 33896 uses managed venv editable mapping agent/hermes_cli/run_agent -> X:/Eternia/hermes-agent. Do not change live checkout until authorized maintenance window.",
+  "worktrees": [
+    {
+      "path": "X:/Eternia/hermes-agent",
+      "head": "34ad8ba33f2508ab10bb24a26f0377ddb62660cb",
+      "head_unchanged": true,
+      "status_unchanged": true,
+      "dirty_entries": 0
+    },
+    {
+      "path": "X:/wt/local-llama-hermes",
+      "head": "31bf01536a20609e5db0eb508ffcf55c4e7b10df",
+      "head_unchanged": true,
+      "status_unchanged": true,
+      "dirty_entries": 7
+    },
+    {
+      "path": "X:/Unreal Engine/Engine/Launcher/EterniaLauncher",
+      "head": "dd20ddb621cb5c874cc8749398affb7912a2f4ec",
+      "head_unchanged": true,
+      "status_unchanged": true,
+      "dirty_entries": 65
+    },
+    {
+      "path": "X:/wt/chara-s1",
+      "head": "86fdd9aae9ca6c96e8179a14767f8f0dea34bfa0",
+      "head_unchanged": true,
+      "status_unchanged": true,
+      "dirty_entries": 0
+    },
+    {
+      "path": "X:/wt/kind3",
+      "head": "4bcb51341eccb913e2d9fbfa60307c0d5dcf2858",
+      "head_unchanged": true,
+      "status_unchanged": true,
+      "dirty_entries": 0
+    },
+    {
+      "path": "X:/wt/local-llama-launcher",
+      "head": "36b5c6813af13f0500efbe24f004ab749293f916",
+      "head_unchanged": true,
+      "status_unchanged": true,
+      "dirty_entries": 0
+    },
+    {
+      "path": "X:/wt/maps-bytes2",
+      "head": "13dc30ecf0449c07b19cc8a6af8d052a2db729b0",
+      "head_unchanged": true,
+      "status_unchanged": true,
+      "dirty_entries": 0
+    },
+    {
+      "path": "X:/wt/maps-voice",
+      "head": "4b0900b89f90a38a4cbf10eabd53b50426175daa",
+      "head_unchanged": true,
+      "status_unchanged": true,
+      "dirty_entries": 9
+    },
+    {
+      "path": "X:/wt/motion-w42",
+      "head": "4c411d0171f139e2a19e7a8af8e60b06388d7485",
+      "head_unchanged": true,
+      "status_unchanged": true,
+      "dirty_entries": 0
+    }
+  ]
+}

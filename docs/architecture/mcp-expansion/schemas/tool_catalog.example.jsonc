@@ -1,0 +1,91 @@
+// Example tool catalog shape — Hermes-side equivalent of
+// tool/stagec_qa_mcp_server/lib/tools.dart.
+//
+// Every MCP server in this expansion publishes a Python-side catalog at
+// hermes/<server_module>/tool_catalog.py whose serialized form looks like
+// this. The catalog is the single source of truth — both FastMCP tool
+// registration and the catalog regression test read it.
+//
+// Cited by:
+//   03-stage-2-hermes-control-mcp.md Decision-1 + §"Generic requirements" point 1
+//   11-stage-2.5-hermes-control-mutate.md
+//   12-third-pass-addendum.md §H
+
+{
+  "server": "hermes-control",
+  "stage": "2",
+  "mode": "read-only",
+  "min_mcp_protocol_version": "2024-11-05",
+  "tools": [
+    {
+      "name": "hermes_kanban_list_cards",
+      "summary": "List kanban cards on the active board.",
+      "dispatch": {
+        "via": "model_tools.handle_function_call",
+        "underlying_tool": "kanban_list"
+      },
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "board":    { "type": ["string", "null"] },
+          "status":   { "type": "array", "items": { "type": "string", "enum": ["triage", "todo", "ready", "running", "blocked", "done", "archived"] } },
+          "assignee": { "type": ["string", "null"] },
+          "limit":    { "type": "integer", "minimum": 1, "maximum": 500, "default": 50 },
+          "offset":   { "type": "integer", "minimum": 0, "default": 0 }
+        }
+      },
+      "output_shape": "list_with_meta",
+      "serialised": false,
+      "mutates": false,
+      "cacheable": true,
+      "redaction": { "applies": true, "kind": "structured" }
+    },
+
+    {
+      "name": "hermes_cron_list",
+      "summary": "List cron jobs for the caller profile.",
+      "dispatch": {
+        "via": "model_tools.handle_function_call",
+        "underlying_tool": "cronjob",
+        "fixed_args": { "action": "list" }
+      },
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "show_disabled": { "type": "boolean", "default": false },
+          "limit":         { "type": "integer", "minimum": 1, "maximum": 500, "default": 50 },
+          "offset":        { "type": "integer", "minimum": 0, "default": 0 }
+        }
+      },
+      "output_shape": "list_with_meta",
+      "serialised": false,
+      "mutates": false,
+      "cacheable": true,
+      "redaction": { "applies": true, "kind": "structured" }
+    },
+
+    {
+      "name": "hermes_logs_tail",
+      "summary": "Tail a profile log file.",
+      "dispatch": { "via": "direct" },
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["log"],
+        "properties": {
+          "profile": { "type": ["string", "null"] },
+          "log":     { "type": "string", "minLength": 1 },
+          "lines":   { "type": "integer", "minimum": 1, "maximum": 5000, "default": 200 }
+        }
+      },
+      "output_shape": "text_with_meta",
+      "serialised": false,
+      "mutates": false,
+      "cacheable": false,
+      "redaction": { "applies": true, "kind": "text" }
+    }
+    // ...remaining Stage 2 read tools follow the same pattern.
+  ]
+}

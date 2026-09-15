@@ -1,0 +1,4 @@
+skip-agent
+# Original PR 88052, commit aa500613f8a33178fad2c61a95a582f240aa7a37.
+# Salvage PR 88126 preserved this exact email and explicitly credited @skip-agent.
+# Separate directory preserves the existing lowercase-host @momomojo mapping.

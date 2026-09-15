@@ -1,0 +1,102 @@
+// Per-server closure verification manifest.
+// Every stage produces one of these at docs/architecture/mcp-expansion/closures/<DATE>-stage-<N>-<server>.verify.json.
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eternia.local/schemas/mcp-expansion/verification.schema.json",
+  "title": "MCP server closure verification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "server",
+    "stage",
+    "profile",
+    "commit",
+    "branch",
+    "dirty",
+    "ts",
+    "checks",
+    "redaction"
+  ],
+  "properties": {
+    "server": {
+      "type": "string",
+      "enum": [
+        "hermes-control",
+        "hermes-control-mutate",
+        "hermes-messaging",
+        "arcadia-brain",
+        "arcadia-agentops",
+        "arcadia-pm",
+        "arcadia-release",
+        "eternia-launcher-qa",
+        "eternia-backend"
+      ]
+    },
+    "stage": {
+      "type": "string",
+      "enum": ["0", "1", "2", "2.5", "3", "4", "4.5", "5", "6"]
+    },
+    "profile": { "type": "string", "minLength": 1 },
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+    "branch": { "type": "string", "minLength": 1 },
+    "dirty": { "type": "boolean" },
+    "ts": { "type": "string", "format": "date-time" },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mcp_list_shows_server",
+        "mcp_test_passes",
+        "fresh_session_lists_tools",
+        "selftest_passes",
+        "real_tool_call_succeeds",
+        "out_of_scope_tools_blocked"
+      ],
+      "properties": {
+        "mcp_list_shows_server":      { "$ref": "#/$defs/check" },
+        "mcp_test_passes":            { "$ref": "#/$defs/check" },
+        "fresh_session_lists_tools":  { "$ref": "#/$defs/check" },
+        "selftest_passes":            { "$ref": "#/$defs/check" },
+        "real_tool_call_succeeds":    { "$ref": "#/$defs/check" },
+        "mutations_write_audit_rows": { "$ref": "#/$defs/check" },
+        "artifact_manifest_exists":   { "$ref": "#/$defs/check" },
+        "out_of_scope_tools_blocked": { "$ref": "#/$defs/check" },
+        "closure_note_complete":      { "$ref": "#/$defs/check" }
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["files_scanned", "findings", "patterns_checked"],
+      "properties": {
+        "files_scanned":     { "type": "integer", "minimum": 0 },
+        "findings":          { "type": "integer", "minimum": 0, "maximum": 0 },
+        "patterns_checked":  { "type": "integer", "minimum": 1 }
+      }
+    },
+    "classification": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "NEEDS_FIX",
+        "FAIL_NON_BLOCKING_TOOLING_PARITY",
+        "NOT_RUN_MISSING_CONTEXT",
+        "REDACTION_FAIL",
+        "ARTIFACT_MISSING"
+      ]
+    },
+    "manifest_path": { "type": "string", "minLength": 1 }
+  },
+  "$defs": {
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": { "type": "string", "enum": ["PASS", "FAIL", "NOT_RUN"] },
+        "evidence_path": { "type": "string" },
+        "notes": { "type": "string" }
+      }
+    }
+  }
+}

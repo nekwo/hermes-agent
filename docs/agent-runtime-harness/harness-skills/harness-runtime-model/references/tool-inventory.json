@@ -1,0 +1,451 @@
+{
+  "schema_version": 1,
+  "declared": [
+    "harness_core"
+  ],
+  "toolsets": [
+    {
+      "name": "agent_chat",
+      "tools": [
+        "agent_chat_dispatches",
+        "agent_chat_installs",
+        "agent_chat_log_path",
+        "agent_chat_open",
+        "agent_chat_send",
+        "agent_chat_threads"
+      ]
+    },
+    {
+      "name": "board",
+      "tools": [
+        "board_card_add",
+        "board_cards"
+      ]
+    },
+    {
+      "name": "clarify",
+      "tools": [
+        "clarify"
+      ]
+    },
+    {
+      "name": "delegation",
+      "tools": [
+        "delegate_task"
+      ]
+    },
+    {
+      "name": "terminal",
+      "tools": [
+        "process_manage",
+        "terminal"
+      ]
+    },
+    {
+      "name": "file",
+      "tools": [
+        "patch",
+        "read_file",
+        "search_files",
+        "write_file"
+      ]
+    },
+    {
+      "name": "web",
+      "tools": [
+        "web_extract",
+        "web_search"
+      ]
+    },
+    {
+      "name": "browser",
+      "tools": [
+        "browser_back",
+        "browser_click",
+        "browser_console",
+        "browser_get_images",
+        "browser_navigate",
+        "browser_press",
+        "browser_scroll",
+        "browser_snapshot",
+        "browser_type",
+        "browser_vault_enter_code",
+        "browser_vault_fill",
+        "browser_vault_list",
+        "browser_vault_save_login",
+        "browser_vault_unlock",
+        "browser_vision"
+      ]
+    },
+    {
+      "name": "browser-cdp",
+      "tools": [
+        "browser_cdp",
+        "browser_dialog"
+      ]
+    },
+    {
+      "name": "skills",
+      "tools": [
+        "skill_manage",
+        "skill_search",
+        "skill_view",
+        "skills_list"
+      ]
+    },
+    {
+      "name": "memory",
+      "tools": [
+        "memory"
+      ]
+    },
+    {
+      "name": "todo",
+      "tools": [
+        "todo_list"
+      ]
+    },
+    {
+      "name": "session_search",
+      "tools": [
+        "session_search"
+      ]
+    },
+    {
+      "name": "vision",
+      "tools": [
+        "vision_analyze"
+      ]
+    },
+    {
+      "name": "code_execution",
+      "tools": [
+        "execute_code"
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "name": "agent_chat_dispatches",
+      "toolset": "agent_chat",
+      "mutating": false,
+      "gated": false,
+      "description": "List your in-flight and recent background dispatches (read-only)."
+    },
+    {
+      "name": "agent_chat_installs",
+      "toolset": "agent_chat",
+      "mutating": false,
+      "gated": false,
+      "description": "List the other installs (machines) paired with this one, or one install's agent roster (read-only, no mint)."
+    },
+    {
+      "name": "agent_chat_log_path",
+      "toolset": "agent_chat",
+      "mutating": false,
+      "gated": false,
+      "description": "Get the file path of a teammate thread's live transcript log to grep/tail the full history (read-only, no mint)."
+    },
+    {
+      "name": "agent_chat_open",
+      "toolset": "agent_chat",
+      "mutating": false,
+      "gated": false,
+      "description": "Review the recent message tail of your shared thread with a teammate (read-only, no mint)."
+    },
+    {
+      "name": "agent_chat_send",
+      "toolset": "agent_chat",
+      "mutating": false,
+      "gated": false,
+      "description": "Send a chat message to another Harness persona and return their reply, or dispatch it in the background with wait=false (agent-to-agent chat)."
+    },
+    {
+      "name": "agent_chat_threads",
+      "toolset": "agent_chat",
+      "mutating": false,
+      "gated": false,
+      "description": "List your agent-to-agent chat threads with reachable teammates (read-only, no mint)."
+    },
+    {
+      "name": "board_card_add",
+      "toolset": "board",
+      "mutating": false,
+      "gated": false,
+      "description": "Add a planning card to the Mission Board (advisory; never mutates a goal)."
+    },
+    {
+      "name": "board_cards",
+      "toolset": "board",
+      "mutating": false,
+      "gated": false,
+      "description": "List active Mission Board cards for the current workspace."
+    },
+    {
+      "name": "browser_back",
+      "toolset": "browser",
+      "mutating": false,
+      "gated": true,
+      "description": "Go back to the previous page in browser history."
+    },
+    {
+      "name": "browser_cdp",
+      "toolset": "browser-cdp",
+      "mutating": false,
+      "gated": true,
+      "description": "Send a raw Chrome DevTools Protocol (CDP) command. Escape hatch for browser operations not covered by browser_navigate, browser_click, browser_console, etc...."
+    },
+    {
+      "name": "browser_click",
+      "toolset": "browser",
+      "mutating": false,
+      "gated": true,
+      "description": "Click an element by its snapshot ref ID (e.g. @e5). Requires a prior browser_snapshot."
+    },
+    {
+      "name": "browser_console",
+      "toolset": "browser",
+      "mutating": false,
+      "gated": true,
+      "description": "Get the current page's console output and uncaught JS errors (log/warn/error/info); pass `expression` to evaluate JS in the page and return the result. Use t..."
+    },
+    {
+      "name": "browser_dialog",
+      "toolset": "browser-cdp",
+      "mutating": false,
+      "gated": true,
+      "description": "Respond to a native JavaScript dialog (alert / confirm / prompt / beforeunload) that is currently blocking the page. **Workflow:** call ``browser_snapshot``..."
+    },
+    {
+      "name": "browser_get_images",
+      "toolset": "browser",
+      "mutating": false,
+      "gated": true,
+      "description": "List all images on the current page with URLs and alt text (find images to analyze with vision_analyze)."
+    },
+    {
+      "name": "browser_navigate",
+      "toolset": "browser",
+      "mutating": false,
+      "gated": true,
+      "description": "Navigate to a URL and load the page; must be called before other browser_* tools. Returns a compact snapshot with ref IDs. Disambiguator: for plain info or p..."
+    },
+    {
+      "name": "browser_press",
+      "toolset": "browser",
+      "mutating": false,
+      "gated": true,
+      "description": "Press a keyboard key (Enter to submit, Tab to navigate, or a shortcut)."
+    },
+    {
+      "name": "browser_scroll",
+      "toolset": "browser",
+      "mutating": false,
+      "gated": true,
+      "description": "Scroll the page in a direction to reveal content above or below the viewport."
+    },
+    {
+      "name": "browser_snapshot",
+      "toolset": "browser",
+      "mutating": false,
+      "gated": true,
+      "description": "Get a text accessibility-tree snapshot of the current page with ref IDs (@e1...) for browser_click/type. full=false compact (default), full=true complete. Ov..."
+    },
+    {
+      "name": "browser_type",
+      "toolset": "browser",
+      "mutating": false,
+      "gated": true,
+      "description": "Type text into an input field by its snapshot ref ID (clears the field first)."
+    },
+    {
+      "name": "browser_vault_enter_code",
+      "toolset": "browser",
+      "mutating": false,
+      "gated": true,
+      "description": "The page asks for a one-time / verification / 2FA code after the password: call this. If the saved login has an authenticator key the code is generated and e..."
+    },
+    {
+      "name": "browser_vault_fill",
+      "toolset": "browser",
+      "mutating": false,
+      "gated": true,
+      "description": "Fill the CURRENT browser page from a vault handle (see browser_vault_list): a login item fills ONLY the password field (type the identifier/username yourself..."
+    },
+    {
+      "name": "browser_vault_list",
+      "toolset": "browser",
+      "mutating": false,
+      "gated": true,
+      "description": "ALWAYS call this first when a page asks for a password, card or address. Lists saved website logins, payment cards and addresses as handles with metadata (ki..."
+    },
+    {
+      "name": "browser_vault_save_login",
+      "toolset": "browser",
+      "mutating": false,
+      "gated": true,
+      "description": "The current page is a login form and browser_vault_list has no item for its origin: ask the user, through a masked prompt in their UI, to save the login for..."
+    },
+    {
+      "name": "browser_vault_unlock",
+      "toolset": "browser",
+      "mutating": false,
+      "gated": true,
+      "description": "Ask the user to unlock a password manager (1Password or Bitwarden) for this session. The master password is typed into a masked prompt owned by the UI and ne..."
+    },
+    {
+      "name": "browser_vision",
+      "toolset": "browser",
+      "mutating": false,
+      "gated": true,
+      "description": "Screenshot the current page to inspect it visually (CAPTCHAs, layout, visual checks). Native-vision models see it next turn; others get an auxiliary text ana..."
+    },
+    {
+      "name": "clarify",
+      "toolset": "clarify",
+      "mutating": false,
+      "gated": true,
+      "description": "Ask 1-5 independent questions in one call. Put options only in choices, recommended first; omit for free text. Responses preserve order. Decide low-stakes ma..."
+    },
+    {
+      "name": "delegate_task",
+      "toolset": "delegation",
+      "mutating": false,
+      "gated": true,
+      "description": "Spawn one or more subagents in isolated contexts. Description is rebuilt at every get_definitions() call to reflect the user's current delegation limits."
+    },
+    {
+      "name": "execute_code",
+      "toolset": "code_execution",
+      "mutating": false,
+      "gated": true,
+      "description": "Run Python in a persistent session kernel via `from hermes_tools import ...` (web_search, web_extract, read_file, write_file, search_files, patch, terminal)...."
+    },
+    {
+      "name": "memory",
+      "toolset": "memory",
+      "mutating": false,
+      "gated": true,
+      "description": "Save durable facts to persistent memory that survive across sessions. Memory is injected into every future turn, so keep entries compact and high-signal. HOW..."
+    },
+    {
+      "name": "patch",
+      "toolset": "file",
+      "mutating": true,
+      "gated": true,
+      "description": "Targeted find-and-replace file edits with fuzzy matching; returns a unified diff and auto-runs syntax checks. Supply path, old_string and new_string. Disambi..."
+    },
+    {
+      "name": "process_manage",
+      "toolset": "terminal",
+      "mutating": false,
+      "gated": false,
+      "description": "Background processes: wait returns partial output on timeout. submit appends Enter to answer prompts; write sends raw bytes, no newline. notify requests a re..."
+    },
+    {
+      "name": "read_file",
+      "toolset": "file",
+      "mutating": false,
+      "gated": true,
+      "description": "Read a text file with line numbers and pagination (offset/limit; large reads truncate on a line boundary with next_offset). Auto-extracts .ipynb/.docx/.xlsx/..."
+    },
+    {
+      "name": "search_files",
+      "toolset": "file",
+      "mutating": false,
+      "gated": true,
+      "description": "Search file contents (target='content', regex, ripgrep-backed) or find files by name/glob (target='files', sorted by mtime). Disambiguator: use instead of sh..."
+    },
+    {
+      "name": "session_search",
+      "toolset": "session_search",
+      "mutating": false,
+      "gated": true,
+      "description": "Search conversation history (FTS5): query to discover; session_id + around_message_id to scroll; session_id to read; no args for recent. Paste returned link..."
+    },
+    {
+      "name": "skill_manage",
+      "toolset": "skills",
+      "mutating": false,
+      "gated": false,
+      "description": "Create, update, or delete skills — your procedural memory for recurring task types. The call is an operations array (a single edit is a list of one); it appl..."
+    },
+    {
+      "name": "skill_search",
+      "toolset": "skills",
+      "mutating": false,
+      "gated": true,
+      "description": "Search installed skills + the Hermes Skills Hub by query without loading SKILL.md bodies (compact ids/descriptions). Disambiguator: skill_view loads an insta..."
+    },
+    {
+      "name": "skill_view",
+      "toolset": "skills",
+      "mutating": false,
+      "gated": true,
+      "description": "Skills allow for loading information about specific tasks and workflows, as well as scripts and templates. Load a skill's full content or access its linked f..."
+    },
+    {
+      "name": "skills_list",
+      "toolset": "skills",
+      "mutating": false,
+      "gated": true,
+      "description": "List available skills (name + description). Use skill_view(name) to load full content."
+    },
+    {
+      "name": "terminal",
+      "toolset": "terminal",
+      "mutating": true,
+      "gated": true,
+      "description": "Run shell commands in the configured environment (cwd and exported env persist between calls). Foreground returns when done; background=true with notify_on_c..."
+    },
+    {
+      "name": "todo_list",
+      "toolset": "todo",
+      "mutating": false,
+      "gated": true,
+      "description": "Session task list for 3+ steps; no args reads it. For requested batches, enumerate every instance; split phases via parent. Keep ONE item in_progress; mark c..."
+    },
+    {
+      "name": "vision_analyze",
+      "toolset": "vision",
+      "mutating": false,
+      "gated": true,
+      "description": "Load an image (URL, local path, or data URL) into the conversation so you can see it. Native-vision models read the pixels next turn; others get an auxiliary..."
+    },
+    {
+      "name": "web_extract",
+      "toolset": "web",
+      "mutating": false,
+      "gated": true,
+      "description": "Extract clean markdown/text from web page or PDF URLs (no LLM summarization). Large pages return a head+tail window with a saved-file path to read the rest...."
+    },
+    {
+      "name": "web_search",
+      "toolset": "web",
+      "mutating": false,
+      "gated": true,
+      "description": "Search the web (up to 5 results: title, URL, description). Backend operators like site:, filetype:, intitle:, -term, and \"exact phrase\" may work. Disambiguat..."
+    },
+    {
+      "name": "write_file",
+      "toolset": "file",
+      "mutating": true,
+      "gated": true,
+      "description": "Write a file, completely replacing its contents (creates parent dirs; auto-syntax-checks and surfaces only NEW errors). Disambiguator: overwrites the whole f..."
+    }
+  ],
+  "counts": {
+    "tools": 44,
+    "toolsets": 15,
+    "token_estimate": 1190
+  },
+  "cli_only_verbs": [
+    "persona instance open-chat",
+    "mission-chat steer",
+    "mission-chat turn-resolve",
+    "mission-chat queue-skill",
+    "persona instance return-summary",
+    "persona instance steer",
+    "flow set"
+  ]
+}

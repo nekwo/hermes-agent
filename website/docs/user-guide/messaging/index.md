@@ -513,7 +513,8 @@ When the agent running a background session uses `terminal(background=true)` to 
 
 ```yaml
 display:
-  background_process_notifications: concise    # concise | all | result | error | off
+  background_process_notifications: result # concise | all | result | error | off
+  background_process_agent_turns: false    # legacy full-agent completion turns
 ```
 
 | Mode | What you receive |

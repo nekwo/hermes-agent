@@ -1,0 +1,26 @@
+{
+  "source_snapshot": "34ad8ba33f2508ab10bb24a26f0377ddb62660cb",
+  "complete": true,
+  "receipt_sha256": "ad5114cac96852bc409bc0189fdc7036fd85f38e4f93d4985350112101123946",
+  "operation_states": {
+    "config.set": "succeeded",
+    "catalog.scan": "succeeded",
+    "start": "succeeded",
+    "load": "succeeded",
+    "unload": "succeeded",
+    "stop": "succeeded"
+  },
+  "auxiliary_local_route": {
+    "same_model": true,
+    "same_endpoint": true,
+    "context_size": 8192
+  },
+  "full_agent": {
+    "api_calls": 2,
+    "tool_marker_present": true,
+    "tool_event_count": 2
+  },
+  "runtime_closed": true,
+  "raw_receipt": "qa-artifacts/upstream-sync-baseline-llama/runtime-receipt.json",
+  "scope": "Original fork baseline, not upstream integration evidence"
+}

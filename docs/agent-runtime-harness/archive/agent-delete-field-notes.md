@@ -1,0 +1,373 @@
+# Agent delete + roster identity — hermes field notes
+
+Running record for the hermes half of
+`agent-delete-and-roster-identity.md` (Stages R1, D1, D2, and the hermes half of
+D4; the plan file was deleted by the landing that folded its shipped facts into
+docs 01 and 06 — the placement-verb precedent). House rule: a falsified
+assumption is written here the moment it falsifies, not at the end.
+
+Base ref: `01b6ad1813` (the plan commit). Worktree branch:
+`worktree-agent-a32a0ca2d070be5db`.
+
+## F0 — the worktree did not contain the plan (environment, not plan)
+
+The worktree branch was cut from `origin/main` (`081c4e0fc4`, the charsheet
+recorded-home lane), which is NOT an ancestor of local `main` (`01b6ad1813`,
+where the plan lives). The two have diverged: three charsheet commits on
+`origin/main`, twenty-six gateway/persona commits on local `main`.
+
+Reset the (clean, unstarted) worktree branch to `01b6ad1813` so that the plan is
+present and `--base 01b6ad1813` names a real ancestor. Nothing was lost: the
+three charsheet commits remain on `origin/main` and on branch
+`chara/recorded-home-D-hermes`, and a fourth worktree (`X:/wt/op-backfill`)
+still stands on them.
+
+## F1 — the server's own mint is NOT discriminable (plan assumption falsified)
+
+The plan states `agent_create.mint_placement_id` (line 338) "mints the proper
+shape only when it is omitted", and R1's acceptance asks for "acceptance for
+launcher-minted shapes and for omitted (server-minted) ids" — both of which
+presume the server mint already clears the discriminator.
+
+Measured: it does not.
+
+* launcher mint (`mission_agent_identity.dart:163`) — `'${personaToken}_agent_${hex8()}'`
+* launcher discriminator (`mission_agent_identity.dart:121`) — `RegExp(r'_agent_(\d+|[0-9a-f]{8})$')`
+* hermes mint (`agent_create.py:338`) — `f"{token}_{uuid.uuid4().hex[:8]}"`
+
+The hermes mint has no `_agent_` marker, so `agent create --persona profile:alice`
+with `--placement-id` OMITTED mints `profile_alice_5f3a9c21`, derives
+`personainst_profile_alice_5f3a9c21`, and that id fails the launcher
+discriminator exactly as the hand-typed `known_alice` did. The mint's own
+docstring claims it is "shaped like the launcher's own" and names
+`missionMintDeliberatePlacementId` as the peer; the claim was never true.
+
+So R1's incident is reachable through the door the plan treats as the safe one.
+A fence that only refuses caller-supplied ids would leave the server mint
+minting non-discriminable ids forever.
+
+**Adaptation:** fix the mint to `f"{token}_agent_{uuid.uuid4().hex[:8]}"` as part
+of R1. Nothing pins the old shape (no test, no fixture, no caller references
+`mint_placement_id` outside `agent_create.py:538`), and ids already minted keep
+working — the fence is on new ids only.
+
+## F2 — R1's fence has THREE boundaries, not one (plan assumption falsified)
+
+The plan says to fence "at the service boundary (where caller-supplied placement
+ids are first validated in `agent_create.py`)", while its acceptance asks for a
+refusal on `persona instance create`, `persona instance open`, AND `agent create`.
+
+Measured: the two persona-instance verbs do not pass through `agent_create.py`
+at all.
+
+| verb | placement id first normalised | reaches |
+| --- | --- | --- |
+| `agent create` / `runtime.agent.create` | `agent_create.py:540` (`_parse_request`) | `AgentCreateRequest` |
+| `persona instance create --add-instance` | `persona_commands.py:772` | `PersonaInstanceStore.add_instance` (`persona_assignments.py:2270`) |
+| `persona instance open-chat --add-instance` | `persona_commands.py:966` | `PersonaInstanceStore.add_instance` |
+
+A single fence in `agent_create.py` would satisfy one third of R1's own
+acceptance list.
+
+**Adaptation:** the REGEX and the refusal text are written once (one shape
+authority beside `looks_like_persona_instance_id`, the module the codebase
+already names as the single id-shape authority) and called from the three
+boundaries in each lane's existing refusal idiom.
+
+Deliberately NOT fenced at the store (`add_instance`), even though the class-key
+fence's EG-6.6 argument favours store-level guards: that guard protects a store
+INVARIANT, while this one validates caller-supplied INPUT. Rows whose ids
+predate the discriminator (every canonical `personainst_<persona>` channel, and
+every id the old mint produced) are legitimate and must keep resolving; a
+store-level refusal would refuse them on read-modify-write paths that never
+accepted operator input at all.
+
+## F4 — R1's real cost is fixture churn the plan did not price
+
+R1's acceptance reads as four new tests. Measured: turning the fence on reddened
+**42 existing tests** across 13 suites, because the fixtures place agents with
+ad-hoc tokens (`qa_nows`, `qa_phase`, `scene_child_1`, `sender`) that the new
+contract makes illegal. That is not incidental — those fixtures were minting
+exactly the ids the incident was made of.
+
+Migrated 244 literals in the 13 files that DECLARE a placement id, by appending
+`_agent_2` to each token. Two things this migration got wrong on the first pass
+and had to be corrected:
+
+* a first version scoped tokens globally rather than per file, so the generic
+  token `sender` was rewritten in unrelated gateway and photon-plugin suites.
+  Reverted and re-scoped: a token is rewritten in a file only if THAT file
+  declares it as a placement id.
+* the rewrite corrupted two deliberately-malformed fixtures (`"///"` and
+  `"!!!"`, which exist to drive the `placement_id_invalid` arm) into
+  `"///_agent_2"`. Restored by hand; they must stay un-tokenisable or the arm
+  above the new one goes uncovered.
+
+Three fixtures escaped the regex entirely because they spell the default with an
+annotation (`placement_id: str = "qa_retire_1"`); fixed by hand in
+`test_agent_retire_service.py`, `test_serve_rpc_agent_retire.py`, and
+`test_agent_retire_verb.py`.
+
+**A static scan cannot find them all, and the suites that hide them are the
+ones a reviewer would never look at.** The literal-pattern migration keyed on
+`placement_id=`, `"placement_id":` and `"--placement-id",`. Five suites build
+the id dynamically instead — `_create(persona, placement)`,
+`_drag_in_an_agent("qa_agent_threaded")`, `_create_with_skills(..., placement=...)`
+— so their ids were invisible to every regex and to the "which files declare a
+placement id" file list the migration was scoped by. They were found only by
+running the full `tests/agent_runtime tests/hermes_cli` sweep, which is also why
+that sweep is not optional on a change of this shape: the four suites named in
+the plan's acceptance were green while `test_agent_create_subphases`,
+`test_persona_prewarm`, `test_harness_doctor`, `test_persona_skill_policy` and
+`test_created_agent_first_message` were red. Fixed in a follow-up commit
+(24 literals).
+
+**A scripted edit on Windows must write bytes, not text.** `Path.write_text`
+applies the platform newline translation, so the migration silently flipped 13
+LF files to CRLF and turned a 244-literal rename into a 16 000-line diff — and
+`tests/mutation_claims.json` the same way, where it first read as a 730/670
+rewrite of a file I had appended four rows to. The repo is MIXED (e.g.
+`test_office_store.py` is natively CRLF), so "normalise everything to LF" would
+be wrong too; the rule is to preserve each file's own convention. Restored in a
+separate commit rather than folded into the stage commits, so the fix is
+legible as what it is. Anything scripted over this tree should use
+`read_bytes`/`write_bytes`, or `open(..., newline="")`.
+
+`test_agent_create_service.py::test_every_invalid_arm_has_a_case` is an AST walk
+over the module's refusal arms, so the new reason had to be parametrised there —
+that test is what stops a new arm from shipping uncovered, and it worked.
+
+## F3 — D1 caller audit: the sanctioned resurrection verb does NOT use the arm
+
+Audited every path that can reach the archived-key re-add arm in
+`OfficeStore.upsert_actor` (`office_store.py:747`; arm at `812-830` for the
+archive read and `859-863` for the ledger clear + `archived_path.unlink`).
+
+| caller | lane | designed re-add? |
+| --- | --- | --- |
+| `serve_rpc._runtime_office_upsert` (`serve_rpc.py:1282`) | wire `runtime.office.upsert` | **No — mechanical.** A stale launcher canvas re-sends a removed actor on the next save. Its own docstring already refuses to take a consent parameter ("a parameter is not consent") and points operator intent at `actor-restore`. This is the lane that caused the live incident. |
+| `office_cli._cmd_office_actor_upsert` (`office.py:238`, bare) | CLI `harness office actor-upsert` | **No — mechanical.** Also the launcher's own save path (`harness_capability_registry.dart:581`). |
+| `office_cli._cmd_office_actor_upsert` (`office.py:297`, the `--allow-class-key` replay) | CLI, after a refusal the operator read | **Yes — the only one.** The operator has been shown `class_key_collision` (whose message names `resurrects_archived_class_key`) and has typed an override meaning "bring this back". |
+| `agent_create.perform_agent_create` (`agent_create.py:1720`) | `agent create` / `runtime.agent.create` | Borderline. `persona_instance_id` is derived deterministically from `placement_id`, so re-creating a retired agent at the SAME placement re-upserts an archived key. Judged NOT a resurrection gesture — see F5. |
+| `workspace_template._copy_office` (`workspace_template.py:130`) | template apply | **No — mechanical.** Says so itself: "a template apply holds no operator intent about THIS destination". |
+| `scripts/office_actor_rekey_to_instance.py:189` | migration | Never in the arm by construction (upserts the NEW key, archives the OLD). |
+
+**Verdict:** `harness office actor-restore` — the verb the codebase documents as
+the sanctioned un-archive — does **not** route through `upsert_actor`.
+`_cmd_office_actor_restore` (`office.py:325`) calls `OfficeStore.restore_actor`
+(`office_store.py:933`), which moves the archived bytes back itself. So the
+plan's "if a designed deliberate re-add gesture exists, thread `resurrect=True`
+through exactly that gesture" resolves to: **the sanctioned gesture exists and
+needs nothing**, because it was never on this arm. The door still gets its key,
+and exactly one caller turns it — the `--allow-class-key` consent replay at
+`office.py:297`.
+
+Also noted, out of scope but worth the coordinator's attention:
+`office_sync.apply_office_pull` (`office_sync.py:414`) writes actor files with
+`atomic_json_write`, bypassing `upsert_actor` entirely. It is the blindest
+resurrection loop in the system and this fence does not cover it; it is already
+pinned as a known hole in `test_office_class_key_one_fence.py`
+(`CARVED_OUT_ACTOR_WRITERS`).
+
+A second stale fact found in passing: `serve_rpc.py:41` advises running
+`harness office actor-resolve`, a verb that does not exist. The real one is
+`harness office resolve-conflict`. Corrected in place while adding the fourth
+4090 reason to that same doc block.
+
+## F5 — D1: the plan's "thread resurrect through the designed gesture" resolves
+to a NEW flag, because the two consents are different questions
+
+The plan says to thread `resurrect=True` through the designed deliberate re-add
+if one exists. Per F3 the sanctioned gesture (`actor-restore`) was never on this
+arm, so nothing needed threading. But the audit surfaced a real hazard: the only
+caller reaching the arm with operator intent was the `--allow-class-key` consent
+replay (`office.py:297`), and leaving it un-threaded would make that flag a dead
+end for the commonest case in the program (the class→instance migration archives
+every class key, so "class-keyed AND archived" is ordinary, not a corner).
+
+Rejected making `allow_class_key` imply `resurrect`. They answer different
+questions — one is "may this write use a class key", the other "may this write
+raise the dead" — and an operator who consented to the first was never asked the
+second. Added `--resurrect` as its own flag instead. A write that is both now
+spells both and gets two warnings on the record, which is strictly more
+informative than the single silent override it replaced.
+
+Three consequences worth recording:
+
+* **The tombstone fence sits ABOVE the archive read.** Without consent the write
+  is refused whatever the archive decodes to, so decoding first would only mean
+  answering `archive_unreadable` ("ask again once the file is readable") to a
+  caller whose write can never be accepted. This re-points
+  `test_serve_rpc_office_upsert.py::test_a_re_add_over_an_unreadable_archive_refuses_typed_and_acks_no_revision_1`
+  from `archive_unreadable` to `actor_archived` on the WIRE lane;
+  `archive_unreadable` keeps its coverage on the consented store-level path,
+  where the revision token it protects is actually read.
+* **The fence had to become a named method.** As an inline block it silently
+  broke
+  `test_office_class_key_one_fence.py::test_deleting_the_stores_fence_unguards_every_lane_at_once`,
+  which isolates the class-key fence's claim by
+  monkeypatching it out — every write in that test is also a re-add, so the
+  second fence refused them all and the class-key claim read as proven no matter
+  what. Extracted to `OfficeStore._guard_archived_actor`, matching the store's
+  existing `_guard_*` idiom, so a test isolating one fence can stand the other
+  down.
+* **The refusal escapes through the except block.** The class-key fence runs
+  FIRST, so on the `--allow-class-key` path the tombstone fence is reached
+  inside the `except ClassKeyedPlacementRefused` handler — where the sibling
+  `except` arms cannot catch it. The first cut of this reported `internal_error`
+  for the commonest override run in the program. The arm is repeated inside that
+  handler, with a comment saying why.
+
+## F6 — D2 built as written; the mutation cap is now the binding constraint
+
+D2 needed no adaptation — `OfficeStore.archive_actors_for_instance` already IS
+the sweep the plan describes (it lists live actors bound to the instance through
+`_instance_bound_actor`, the same binding the fresh arm uses, and returns
+`archived_actor_keys` + per-actor `failures`). So the replay reaches the same
+chokepoint the fresh arm does rather than growing a second scan.
+
+Two things the plan did not name, both added:
+
+* the sweep runs BEFORE the archived-keys re-read, not after. Reading first
+  would answer with the wedge's own empty list and then quietly fix it, so a
+  client that lost its ack would still be told nothing came back.
+* `correlation_id` is threaded into `_already_retired_ack`. The sweep emits
+  `office.actor.removed` events and `state.patched` rows of its own, and this
+  verb's S8b fix was precisely that its halves stopped living in two correlation
+  spaces; an untokened self-heal would re-open that gap one arm over.
+
+**The mutation-claim cap is now exactly full.** `scripts/changed_line_mutation_check.py`
+defaults to `--max-candidates 12` and `.github/workflows/tests.yml` runs it with
+the default, so 12 is a hard ceiling for this branch's diff. R1 + D1 + D2 select
+exactly 12, all KILLED. One property is therefore covered by TEST but not by a
+mutation claim: the replay's `correlation_id` threading
+(`test_the_replay_sweeps_under_the_callers_gesture_token`). If the coordinator's
+merge-base diff selects any additional claim, the gate will exit 2 on the cap
+rather than on a survivor — split the landing or raise the cap deliberately, and
+do not read that exit as a mutation failure.
+
+## F8 — the two persona-instance doors disagreed about refusal ORDER
+
+Adding the fence beside each door's existing `placement_id is required`
+pre-check put it in a different position on each verb, and only running
+`test_persona_instance_roster_fence.py` showed it:
+
+* `persona instance create` calls `require_known_persona` BEFORE the block that
+  holds the placement checks, so the roster answer already won there.
+* `persona instance open-chat` asks its roster check INSIDE the
+  `--add-instance` branch, AFTER the placement pre-check — so the new fence
+  landed in front of it and an unknown persona with a badly-shaped placement id
+  started hearing "wrong shape" instead of "no such agent".
+
+Moved open-chat's fence below `require_known_persona` to match create. "That
+agent does not exist" is the more fundamental answer than "that id is the wrong
+shape", and an operator who typed both mistakes should hear the one that is
+about the agent. Both still refuse before any store write.
+
+Worth stating as a general lesson: placing a new guard "next to the similar
+existing guard" is not the same as placing it at the same POINT IN THE ORDER,
+and two doors onto one service had already drifted.
+
+## F9 — the affected-file set had to be derived three times
+
+The full-tree sweep is the only thing that actually settled which suites mint
+placements. Three rounds of stragglers, each invisible to the previous scan:
+
+1. thirteen files matching the three literal spellings (`placement_id=`,
+   `"placement_id":`, `"--placement-id",`);
+2. six files that build the id dynamically
+   (`_create(persona, placement)`, `_drag_in_an_agent("...")`,
+   `_create_with_skills(..., placement=...)`), found by the first full sweep;
+3. `test_persona_set_skills.py` and `test_persona_instance_roster_fence.py`,
+   found by grepping the hyphenated flag spelling `--placement-id` and
+   `--add-instance`, which the underscore-keyed greps had never matched.
+
+Total across the three rounds: 271 literals in 21 files.
+
+## F10 — R1 reached PRODUCTION code, and a truncated grep hid it
+
+A fourth round, and the one that mattered most: `scripts/generate_agent_runtime_stream_fixtures.py`
+— the generator that produces the committed stream goldens — creates its agent
+with `FIXTURE_CREATE_PLACEMENT_ID = "qa_fixture"`. R1 refuses that id, so the
+generator asserted out and three `test_stream_contract_fixture.py` tests went
+red. This is the only PRODUCTION (non-test) caller R1 broke.
+
+Two scanning mistakes let it through, both worth naming:
+
+* I checked "does production hardcode a placement id?" with a grep piped through
+  `head -20`, and the output was exactly 20 lines — truncated precisely where
+  this file would have appeared. A truncated grep answered a completeness
+  question, which it can never do.
+* The re-run without `head` still missed it, because the constant is spelled
+  `FIXTURE_CREATE_PLACEMENT_ID` in UPPERCASE and the pattern was
+  case-sensitive `placement_id\s*[:=]`.
+
+Fixed by giving the generator a discriminable id
+(`qa_fixture_agent_2`), regenerating the two golden frames plus
+`MANIFEST.sha256`, and updating the four pinned ids in
+`test_stream_contract_fixture.py`. All 20 tests in that file pass.
+
+## F11 — accounting for the full-tree run's 48 failures
+
+The whole-tree sweep (`tests/agent_runtime tests/hermes_cli`, 11 030 passed,
+98 skipped, 48 failed) is the only run that found F10, so it earned its cost.
+The 48 break down as:
+
+* **3 were mine** — the `test_stream_contract_fixture.py` trio above. Fixed.
+* **2 are pre-existing at `01b6ad1813`, proven by inspection.**
+  `test_serve_rpc_notification_lane.py::test_the_push_lane_itself_contributes_no_method_and_no_version_bump`
+  asserts every RPC method name starts with `runtime.`; the offender is
+  `peer.ping`, minted by the gateway Stage 6 commits that are already in the
+  base. My diff adds zero `@method(`.
+  `test_error_exit_code_producers.py::test_the_kept_unspendable_baseline_still_describes_the_code`
+  reports that `runtime_unavailable` gained a producer; my diff never mentions
+  that string.
+* **43 are not mine, shown by A/B.** With my nine production files reverted to
+  `01b6ad1813` and restored again, a representative set
+  (`web_server_boot_handshake`, `doctor`/Honcho, `env_custom_keys`,
+  `xai_provider_labels`, `relay_shared_metrics`) gives the IDENTICAL result in
+  both states: six pass, `test_xai_provider_labels` fails. So that one is
+  pre-existing, and the others — which pass in isolation at both base and HEAD —
+  fail only inside the full run. That run performs real work on the machine
+  (it executed `hermes gateway install` and started a Windows gateway, PID
+  3336) and drives npm builds, so those are order/environment failures, not
+  diff failures.
+
+Two operational notes for anyone repeating this:
+
+* `--timeout=30` (the repo default) plus `--timeout-method=thread` KILLS the
+  whole session on a single slow test, with no summary printed. Two full-tree
+  attempts died that way on subprocess-heavy tests that pass standalone in
+  10 s. `--timeout=180` got a complete run.
+* `grep -E "FAILED"` over verbose pytest output is a false-positive machine —
+  parametrised ids like `test_execution_state_wire_spelling[FAILED-failed]
+  PASSED` match it. `FAILED +\[` is the pattern that means a real failure.
+
+## F7 — D4 (hermes half): an alias, and the dump the plan expects does not exist here
+
+`persona instance delete` is `add_parser("retire", aliases=["delete"])` — ONE
+parser object, so the two spellings share flags, defaults, help and handler by
+construction rather than by assertion. The only field that differs is
+argparse's record of which word the operator typed
+(`args.persona_instance_command`), and nothing reads it (checked: its only other
+readers are the parser-shape tests' own lookup tables).
+
+`retire` stays the canonical machine-readable name everywhere — RPC method,
+capability id `persona.instance.retire`, event types, internal symbols — per the
+plan's surface-language-only scope.
+
+**The plan's D4 says to regenerate `hermes_cli_contract.json` "plus the
+byte-pinned copy in hermes if the fixture is mirrored". It is NOT mirrored: no
+`hermes_cli_contract.json` exists anywhere in this repo, and no JSON fixture
+here mentions `placement-id`.** So there is nothing for the hermes agent to
+regenerate, and the launcher agent's dump is the only copy. This branch DOES
+make the committed dump stale, on two counts (see the report's landing section):
+the new `delete` alias, and three `--placement-id` help strings plus a new
+`--resurrect` flag on `office actor-upsert`.
+
+**Not fixed, and the coordinator should know:** `office_sync.apply_office_pull`
+(`office_sync.py:414`) writes actor files with `atomic_json_write`, bypassing
+`upsert_actor` and therefore this fence entirely. It is the blindest
+resurrection loop in the system. Out of D1's scope (the plan names the upsert
+arm), already pinned as a known hole in `test_office_class_key_one_fence.py`'s
+`CARVED_OUT_ACTOR_WRITERS`, and a candidate for its own stage.

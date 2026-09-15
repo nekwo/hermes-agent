@@ -1,0 +1,1642 @@
+--- a/agent/auxiliary_client.py
++++ b/agent/auxiliary_client.py
+@@ -55,6 +55,9 @@
+     __slots__ = ()
+ 
+     def __call__(self, *args, **kwargs):
++        if capability_probe_active():
++            return _CAPABILITY_PROBE_CLIENT
++        _note_client_construction()
+         return _load_openai_cls()(*args, **kwargs)
+ 
+     def __instancecheck__(self, obj):
+@@ -67,43 +70,14 @@
+ OpenAI = _OpenAIProxy()
+ 
+ 
+-# Availability probe mode: check_fns only need to know whether a client is RESOLVABLE, so
+-# inside `aux_probe_mode()` constructors return a stub instead of importing openai + building
+-# httpx/SSL (~0.3s on CLI startup). Stubs are never cached (see _store_cached_client).
+-_aux_probe_state = threading.local()
+-
+-
+-class _AuxProbeClientStub:
+-    """Non-functional placeholder returned while `aux_probe_mode` is active."""
+-    __slots__ = ("api_key", "base_url")
+-
+-    def __init__(self, api_key: str = "", base_url: str = "") -> None:
+-        self.api_key = api_key
+-        self.base_url = base_url
+-
+-    def __getattr__(self, name: str) -> Any:
+-        # Loud failure if a probe stub ever leaks into a runtime call path.
+-        raise RuntimeError(
+-            f"_AuxProbeClientStub used as a real client (attribute {name!r}); "
+-            "aux_probe_mode is for availability checks only")
+-
+-    def __repr__(self) -> str:
+-        return "<aux availability-probe client stub>"
+-
+-
+-def _aux_probe_active() -> bool:
+-    return bool(getattr(_aux_probe_state, "active", False))
+-
+-
+-@contextlib.contextmanager
+-def aux_probe_mode():
+-    """Resolve provider availability without constructing real SDK clients."""
+-    prev = getattr(_aux_probe_state, "active", False)
+-    _aux_probe_state.active = True
+-    try:
+-        yield
+-    finally:
+-        _aux_probe_state.active = prev
++# One probe authority for upstream check_fns and downstream snapshots.
++from agent_runtime.auxiliary_probe import (
++    _CapabilityProbeClient as _AuxProbeClientStub, _CAPABILITY_PROBE_CLIENT,
++    capability_probe_active, capability_probe_scope, is_capability_probe_client,
++    client_construction_count, _note_client_construction,
++)
++_aux_probe_active = capability_probe_active
++aux_probe_mode = capability_probe_scope
+ 
+ 
+ from agent.credential_pool import load_pool
+@@ -2885,6 +2859,7 @@
+         return _AuxProbeClientStub(api_key="", base_url=base_url), model
+     logger.debug("Auxiliary client: Anthropic native (%s) at %s (oauth=%s)", model, base_url, is_oauth)
+     try:
++        _note_client_construction()
+         real_client = build_anthropic_client(token, base_url)
+     except ImportError:
+         return None, None  # Adapter imports fine but the anthropic SDK itself is missing.
+@@ -4319,6 +4294,8 @@
+ 
+ def _to_async_client(sync_client, model: str, is_vision: bool = False):
+     """Sync client → async counterpart, preserving Codex routing (``is_vision`` adds the Copilot vision header)."""
++    if capability_probe_active() or is_capability_probe_client(sync_client):
++        return _CAPABILITY_PROBE_CLIENT, model
+     from openai import AsyncOpenAI
+     if isinstance(sync_client, _AuxProbeClientStub):
+         return sync_client, model
+@@ -4356,6 +4333,7 @@
+     # Hermes owns the auxiliary retry/timeout budget; disable SDK-internal retries.
+     # See #54465.
+     async_kwargs.setdefault("max_retries", 0)
++    _note_client_construction()
+     return AsyncOpenAI(**async_kwargs), model
+ 
+ 
+@@ -4467,8 +4445,7 @@
+     final_model = _normalize_resolved_model(model or "google/gemini-3-flash-preview", provider)
+     try:
+         # Aliased import: a bare `from openai import OpenAI` would shadow the module-level lazy proxy.
+-        from openai import OpenAI as _VertexOpenAI
+-        client = _VertexOpenAI(api_key=token, base_url=base_url)
++                client = OpenAI(api_key=token, base_url=base_url)
+     except Exception as exc:
+         logger.warning("resolve_provider_client: cannot create Vertex client: %s", exc)
+         return None, None
+@@ -5569,7 +5546,7 @@
+         provider, model, async_mode, explicit_base_url=base_url, explicit_api_key=effective_api_key,
+         api_mode=api_mode, main_runtime=runtime, is_vision=is_vision, task=task,
+     )
+-    if client is not None and _aux_probe_active():
++    if client is not None and (_aux_probe_active() or is_capability_probe_client(client)):
+         # Availability probes answer "resolvable?" and must leave the cache untouched: the
+         # probe stub (bare, or wrapped in a Codex/Anthropic adapter whose leaf is the stub)
+         # shares the runtime key, and a cached one is served to every later caller — the
+--- a/hermes_cli/auth.py
++++ b/hermes_cli/auth.py
+@@ -481,16 +481,14 @@
+ 
+ 
+ def _global_auth_file_path() -> Optional[Path]:
+-    """Global-root auth.json in profile mode; None when profile and global root are the same dir.
+-
+-    Read-only fallback path, so no pytest seat belt here (it lives on ``_auth_file_path()``)."""
+-    try:
+-        from hermes_constants import get_default_hermes_root
+-        global_root = get_default_hermes_root()
++    """Read-only shared auth fallback; honor context-local and spawned overrides."""
++    from hermes_constants import get_hermes_auth_home, get_default_hermes_root
++    explicit = get_hermes_auth_home()
++    try:
++        root = Path(explicit) if explicit else get_default_hermes_root()
+     except Exception:
+         return None
+-    return None if _same_path(get_hermes_home(), global_root) else global_root / "auth.json"
+-
++    return None if _same_path(get_hermes_home(), root) else root / "auth.json"
+ 
+ def _load_global_auth_store() -> Dict[str, Any]:
+     """Load the global-root auth store (read-only fallback, mtime-memoised); ``{}`` when absent or
+@@ -2326,3 +2324,9 @@
+     warn_once(__name__, name, *target)
+     return getattr(importlib.import_module(target[0]), target[1])
+ # ---- END PLUGIN-COMPAT ----
++
++# Downstream additions retain their public auth API while living in the fork.
++from agent_runtime.auth_extensions import (
++    read_pool_rotation_state, write_pool_rotation_state,
++    codex_auth_store_credentials_present, _read_global_codex_tokens_if_usable,
++)
+--- a/hermes_cli/auth_codex.py
++++ b/hermes_cli/auth_codex.py
+@@ -469,6 +469,13 @@
+             if imported:
+                 data = {"tokens": imported, "last_refresh": imported.get("last_refresh")}
+     if data is None:
++        from hermes_cli.auth import _read_global_codex_tokens_if_usable
++        global_data = _read_global_codex_tokens_if_usable()
++        if global_data:
++            return _codex_runtime_result(
++                global_data["access_token"], source="global-auth-store",
++                last_refresh=global_data.get("last_refresh"))
++    if data is None:
+         pool_token = _pool_codex_access_token()
+         if pool_token:
+             return _codex_runtime_result(pool_token, source="credential_pool", last_refresh=None)
+--- a/hermes_cli/auth_nous.py
++++ b/hermes_cli/auth_nous.py
+@@ -1309,7 +1309,8 @@
+     now = datetime.now(timezone.utc)
+     token_expires_in = _coerce_ttl_seconds(token_data.get("expires_in", 0))
+     resolved_inference_url = (
+-        _optional_base_url(token_data.get("inference_base_url")) or requested_inference_url)
++        _validate_nous_inference_url_from_network(
++            _optional_base_url(token_data.get("inference_base_url"))) or requested_inference_url)
+     if resolved_inference_url != requested_inference_url:
+         print(f"Using portal-provided inference URL: {resolved_inference_url}")
+     auth_state = {
+--- a/hermes_state.py
++++ b/hermes_state.py
+@@ -390,7 +390,11 @@
+ # one-shots, recovery flows, and read-only cross-profile opens use SessionDB() directly with their own close().
+ 
+ 
++from agent_runtime.session_extensions import RuntimeSessionMixin
++
++
+ class SessionDB(
++    RuntimeSessionMixin,
+     SessionSessionsMixin, SessionFtsSetupMixin, SessionSearchMixin, SessionSchemaMixin,
+     SessionPortabilityMixin, SessionTelegramTopicsMixin, SessionCompressionMixin,
+     SessionGatewayMixin, SessionMaintenanceMixin, SessionUsageMixin, SessionTitlesMixin,
+@@ -1619,3 +1623,6 @@
+     warn_once(__name__, name, *target)
+     return getattr(importlib.import_module(target[0]), target[1])
+ # ---- END PLUGIN-COMPAT ----
++
++# Downstream legacy name; upstream now provides the same call-time resolver.
++_resolve_default_db_path = _default_db_path
+--- a/hermes_state_sessions.py
++++ b/hermes_state_sessions.py
+@@ -1261,7 +1261,7 @@
+                 {select_head}{_sql_session_last_active("s")} AS last_active
+                 {from_sessions}
+                 {where_sql}
+-                ORDER BY s.started_at DESC
++                ORDER BY s.started_at DESC, s.id DESC
+                 LIMIT ? OFFSET ?
+             """
+             params.extend([limit, offset])
+@@ -1278,7 +1278,7 @@
+                     ) AS last_active
+                 {from_sessions}
+                 {pinned_where}
+-                ORDER BY s.started_at DESC
++                ORDER BY s.started_at DESC, s.id DESC
+             """
+             for row in self._read_all(pinned_query, base_where_params):
+                 s = self._list_row(row)
+--- a/hermes_state_messages.py
++++ b/hermes_state_messages.py
+@@ -975,8 +975,10 @@
+                 msg["message_id"] = row["platform_message_id"]
+             if row["observed"]:
+                 msg["observed"] = True
++            if row["finish_reason"]:
++                msg["finish_reason"] = row["finish_reason"]
+             if row["role"] == "assistant":
+-                msg.update((col, row[col]) for col in ("finish_reason", "reasoning") if row[col])
++                msg.update((col, row[col]) for col in ("reasoning",) if row[col])
+                 if row["reasoning_content"] is not None:
+                     msg["reasoning_content"] = row["reasoning_content"]
+                 msg.update(
+--- a/agent/conversation_loop.py
++++ b/agent/conversation_loop.py
+@@ -32,6 +32,11 @@
+ from agent.surface_switch import (
+     identity_line_value, note_inert_pinned_tools, split_runtime_boundary, stage_surface_switch_note,
+ )
++from agent_runtime.conversation_observability import (
++    _emit_conversation_timing, _emit_request_assembled_marker,
++    _format_ttfb_token, _first_delta_recorder,
++)
++
+ from agent.turn_context import PreflightCompressionTimedOut, build_turn_context
+ from agent.turn_retry_state import TurnRetryState
+ # Phase helpers of the turn loop, bound at import so a source-tree swap cannot load a
+@@ -654,6 +659,8 @@
+     Mutates ``agent._cached_system_prompt`` and persists a freshly-built prompt on first
+     build. Row states ``missing``/``null``/``empty``/``present`` are logged and DB
+     failures log at WARNING so silent prefix-cache misses show in ``agent.log``."""
++    _prompt_started = time.perf_counter()
++    agent._system_prompt_restored_from_session = False
+     stored_prompt = None
+     stored_state = "missing"
+     session_row = None
+@@ -687,6 +694,7 @@
+             except Exception:
+                 pass
+             agent._cached_system_prompt = agent._build_system_prompt(system_message)
++            _emit_conversation_timing(agent, "system_prompt_build", _prompt_started, stored_state="capability_refresh")
+             stage_surface_switch_note(agent, agent._cached_system_prompt, conversation_history)
+             # Persist so the NEXT turn restores the new bytes verbatim (cache break is
+             # once per capability change). on_session_start not re-fired: continuation.
+@@ -730,6 +738,8 @@
+         from agent.system_prompt import reconstruct_static_prefix, restore_plugin_prompt_sections
+         restore_plugin_prompt_sections(agent, stored_prompt)
+         reconstruct_static_prefix(agent, system_message=system_message)
++        agent._system_prompt_restored_from_session = True
++        _emit_conversation_timing(agent, "system_prompt_restore", _prompt_started, stored_state=stored_state)
+         return
+     if stored_prompt:
+         stored_state = "stale_runtime"
+@@ -751,6 +761,7 @@
+ 
+     # First turn of a new session (or recovering from a broken stored prompt).
+     agent._cached_system_prompt = agent._build_system_prompt(system_message)
++    _emit_conversation_timing(agent, "system_prompt_build", _prompt_started, stored_state=stored_state)
+ 
+     # The rebuilt prompt describes the CURRENT surface, but a surface note left in the
+     # transcript by an earlier switch does not — retire it here too, or a rebuild for an
+@@ -1433,6 +1444,7 @@
+     persist_user_display_metadata: Optional[Dict[str, Any]] = None,
+     persist_user_platform_id: Optional[str] = None,
+     turn_author: Optional[Dict[str, Any]] = None,
++    reuse_current_user_message: bool = False,
+     moa_config: Optional[dict[str, Any]] = None,
+ ) -> Dict[str, Any]:
+     """Run a complete conversation with tool calling until completion; returns the result dict.
+@@ -1459,6 +1471,7 @@
+     except Exception:
+         logger.debug("per-turn env credential refresh failed", exc_info=True)
+ 
++    _turn_context_started = time.perf_counter()
+     # Per-turn setup: build_turn_context mutates ``agent`` and returns the locals the loop reads.
+     try:
+         _ctx = build_turn_context(
+@@ -1477,10 +1490,14 @@
+             ra=_ra,
+             # MoA turns append per-call aggregated context to the API copy of the
+             # user message, so no byte-stable api_content sidecar can be stamped.
++            reuse_current_user_message=reuse_current_user_message,
+             moa_active=bool(moa_config),
+         )
+     except PreflightCompressionTimedOut as _preflight_timeout_exc:
+         return _preflight_timeout_result(agent, _preflight_timeout_exc, conversation_history)
++
++    _emit_conversation_timing(agent, "turn_context", _turn_context_started,
++        system_prompt_restored=bool(getattr(agent, "_system_prompt_restored_from_session", False)))
+ 
+     # Per-turn agent state (the gateway caches agents across turns, so none of this may
+     # leak into the next message): interim-commentary dedup spans the whole turn but not
+@@ -1570,7 +1587,7 @@
+     return result
+ 
+ 
+-def run_conversation(
++def _run_conversation(
+     agent,
+     user_message: Any,
+     system_message: str = None,
+@@ -1582,6 +1599,7 @@
+     persist_user_display_kind: Optional[str] = None,
+     persist_user_display_metadata: Optional[Dict[str, Any]] = None,
+     persist_user_platform_id: Optional[str] = None,
++    reuse_current_user_message: bool = False,
+     moa_config: Optional[dict[str, Any]] = None,
+     turn_author: Optional[Dict[str, Any]] = None,
+ ) -> Dict[str, Any]:
+@@ -1606,10 +1624,50 @@
+         persist_user_display_kind=persist_user_display_kind,
+         persist_user_display_metadata=persist_user_display_metadata,
+         persist_user_platform_id=persist_user_platform_id,
++        reuse_current_user_message=reuse_current_user_message,
+         moa_config=moa_config,
+         turn_author=turn_author,
+     )
+     return export_current_turn_boundary(agent, result, user_message)
++
++
++def run_conversation(
++    agent,
++    user_message: Any,
++    system_message: str = None,
++    conversation_history: List[Dict[str, Any]] = None,
++    task_id: str = None,
++    stream_callback: Optional[callable] = None,
++    persist_user_message: Optional[Any] = None,
++    persist_user_timestamp: Optional[float] = None,
++    persist_user_display_kind: Optional[str] = None,
++    persist_user_display_metadata: Optional[Dict[str, Any]] = None,
++    moa_config: Optional[dict[str, Any]] = None,
++    reuse_current_user_message: bool = False,
++    persist_user_platform_id: Optional[str] = None,
++    turn_author: Optional[Dict[str, Any]] = None,
++) -> Dict[str, Any]:
++    """Run every model turn with mutation of its interpreter barred."""
++    from tools.lazy_deps import deny_venv_installs, venv_install_denial
++
++    reason = venv_install_denial() or "an agent turn (conversation loop)"
++    with deny_venv_installs(reason):
++        return _run_conversation(
++            agent,
++            user_message,
++            system_message=system_message,
++            conversation_history=conversation_history,
++            task_id=task_id,
++            stream_callback=stream_callback,
++            persist_user_message=persist_user_message,
++            persist_user_timestamp=persist_user_timestamp,
++            persist_user_display_kind=persist_user_display_kind,
++            persist_user_display_metadata=persist_user_display_metadata,
++            moa_config=moa_config,
++            reuse_current_user_message=reuse_current_user_message,
++            persist_user_platform_id=persist_user_platform_id,
++            turn_author=turn_author,
++        )
+ 
+ 
+ __all__ = ["run_conversation"]
+--- a/agent/turn_context.py
++++ b/agent/turn_context.py
+@@ -545,6 +545,7 @@
+     persist_user_timestamp: Optional[float], persist_user_platform_id: Optional[str],
+     persist_user_display_kind: Optional[str],
+     persist_user_display_metadata: Optional[Dict[str, Any]],
++    *, reuse_current_user_message: bool = False,
+ ) -> Tuple[Dict[str, Any], Any]:
+     """Build this turn's user dict, reusing CLI-staged input only when its clean text
+     matches this turn (a stale handoff must not replace later input; voice turns
+@@ -571,10 +572,11 @@
+ 
+     # Synthesized turns stamp their transcript type so the crash persist writes a typed
+     # row; the model still receives role/content unchanged (api_messages strips both).
+-    if persist_user_display_kind:
+-        user_msg["display_kind"] = persist_user_display_kind
+-    if persist_user_display_metadata:
+-        user_msg["display_metadata"] = persist_user_display_metadata
++    if not reuse_current_user_message:
++        if persist_user_display_kind:
++            user_msg["display_kind"] = persist_user_display_kind
++        if persist_user_display_metadata:
++            user_msg["display_metadata"] = persist_user_display_metadata
+     # The platform message id survives the turn-start flush; restart drain-window
+     # recovery dedups via ``has_platform_message_id`` against this row.
+     if persist_user_platform_id is not None:
+@@ -862,7 +864,7 @@
+     persist_user_display_metadata: Optional[Dict[str, Any]]=None, turn_author: Optional[Dict[str, Any]]=None,
+     restore_or_build_system_prompt,
+     install_safe_stdio, sanitize_surrogates, summarize_user_message_for_log, set_session_context,
+-    set_current_write_origin, ra, moa_active: bool=False,
++    set_current_write_origin, ra, moa_active: bool=False, reuse_current_user_message: bool=False,
+ ) -> TurnContext:
+     """Run the once-per-turn setup and return the loop's input context.
+ 
+@@ -925,14 +927,22 @@
+     user_msg, pending_cli_message = _stage_turn_user_message(
+         agent, user_message, persist_user_message, persist_user_timestamp,
+         persist_user_platform_id, persist_user_display_kind, persist_user_display_metadata,
++        reuse_current_user_message=reuse_current_user_message,
+     )
+     _hydrate_from_history(agent, conversation_history)
+     # Every estimator this turn prices images at the cost learned from this model's real usage.
+     bind_image_token_cost(agent)
+     # Append the user message now that close persistence is safe.
+-    append_message(messages, user_msg)
+-    current_turn_user_idx = len(messages) - 1
+-    agent._persist_user_message_idx = current_turn_user_idx
++    if reuse_current_user_message:
++        current_turn_user_idx = next(
++            (i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"), -1,
++        )
++        if current_turn_user_idx < 0:
++            raise ValueError("reuse_current_user_message requires a native user row")
++    else:
++        append_message(messages, user_msg)
++        current_turn_user_idx = len(messages) - 1
++        agent._persist_user_message_idx = current_turn_user_idx
+ 
+     agent._user_turn_count += 1
+     # Copilot x-initiator: the first API call of this user turn is user-initiated;
+--- a/agent/turn_api_call.py
++++ b/agent/turn_api_call.py
+@@ -77,6 +77,11 @@
+         nonlocal thinking_spinner
+         thinking_spinner = stop_thinking_spinner(agent, thinking_spinner)
+ 
++    from agent_runtime.conversation_observability import (
++        _emit_request_assembled_marker, _emit_conversation_timing, _first_delta_recorder,
++    )
++    import time
++    _first_byte_s = [None]
+     _use_streaming = _should_stream(agent)
+ 
+     def _perform_api_call(next_api_kwargs):
+@@ -85,32 +90,46 @@
+                 next_api_kwargs, allow_stream=False, is_github_responses=agent._is_copilot_url(),
+                 sanitize_harmony_tokens=agent._is_codex_backend(),
+             )
+-        if _use_streaming:
+-            return agent._interruptible_streaming_api_call(
+-                next_api_kwargs, on_first_delta=_stop_spinner
+-            )
+-        from agent import relay_llm
+-
+-        return relay_llm.execute(
+-            next_api_kwargs,
+-            agent._interruptible_api_call,
+-            session_id=str(agent.session_id or ""),
+-            name=str(agent.provider or "provider"),
+-            model_name=str(agent.model or ""),
+-            metadata={
+-                "api_mode": agent.api_mode,
+-                "api_request_id": api_request_id,
+-                "call_role": (
+-                    "delegated"
+-                    if getattr(agent, "is_subagent", False)
+-                    else "fallback"
+-                    if int(getattr(agent, "_fallback_index", 0) or 0) > 0
+-                    else "primary"
+-                ),
+-                "retry_count": retry_count,
+-            },
+-            defer_logical_completion=True,
+-        )
++        timing_meta = dict(api_call_count=api_call_count, api_mode=agent.api_mode, provider=agent.provider, model=agent.model)
++        _emit_request_assembled_marker(agent, **timing_meta)
++        _first_byte_s[0] = None
++        agent._fork_first_byte_s = None
++        started = time.perf_counter()
++        status = "failed"
++        try:
++            if _use_streaming:
++                result = agent._interruptible_streaming_api_call(
++                    next_api_kwargs, on_first_delta=_first_delta_recorder(_first_byte_s, started, _stop_spinner)
++                )
++            else:
++                from agent import relay_llm
++        
++                result = relay_llm.execute(
++                    next_api_kwargs,
++                    agent._interruptible_api_call,
++                    session_id=str(agent.session_id or ""),
++                    name=str(agent.provider or "provider"),
++                    model_name=str(agent.model or ""),
++                    metadata={
++                        "api_mode": agent.api_mode,
++                        "api_request_id": api_request_id,
++                        "call_role": (
++                            "delegated"
++                            if getattr(agent, "is_subagent", False)
++                            else "fallback"
++                            if int(getattr(agent, "_fallback_index", 0) or 0) > 0
++                            else "primary"
++                        ),
++                        "retry_count": retry_count,
++                    },
++                    defer_logical_completion=True,
++                )
++            status = "completed"
++            return result
++        finally:
++            agent._fork_first_byte_s = _first_byte_s[0]
++            _emit_conversation_timing(agent, "provider_dispatch", started,
++                status=status, streaming=bool(_use_streaming), **timing_meta)
+ 
+     from hermes_cli.middleware import run_llm_execution_middleware
+ 
+--- a/agent/turn_api_request.py
++++ b/agent/turn_api_request.py
+@@ -107,6 +107,10 @@
+     # api_messages was built for the primary; a fallback (DeepSeek / Kimi / MiMo) may
+     # require reasoning_content — re-apply the echo-back pad (idempotent) and re-render
+     # the prompt-cache decoration for the current provider.
++    from agent_runtime.conversation_observability import _emit_conversation_timing
++    import time
++    timing_meta = dict(api_call_count=api_call_count, api_mode=agent.api_mode, provider=agent.provider, model=agent.model)
++    request_build_started = time.perf_counter()
+     agent._reapply_reasoning_echo_for_provider(api_messages)
+     api_messages, _moa_prepared_request, tools_for_api = (
+         _redecorate_prompt_cache_for_provider(
+@@ -126,6 +130,10 @@
+             api_kwargs, allow_stream=False, is_github_responses=agent._is_copilot_url(),
+             sanitize_harmony_tokens=agent._is_codex_backend(),
+         )
++    _emit_conversation_timing(agent, "request_build", request_build_started,
++        message_count=len(api_messages), tool_count=len(agent.tools or []),
++        approx_input_tokens=approx_tokens, request_char_count=total_chars, **timing_meta)
++    pre_api_hook_started = time.perf_counter()
+     # OpenRouter caching replays identical responses, even empty ones; an empty-response
+     # retry must bypass the cache.
+     if agent._empty_content_retries > 0 and agent._is_openrouter_url():
+@@ -159,8 +167,11 @@
+         effective_task_id=effective_task_id, turn_id=turn_id,
+     )
+ 
++    _emit_conversation_timing(agent, "pre_api_hook", pre_api_hook_started, **timing_meta)
+     if env_var_enabled("HERMES_DUMP_REQUESTS"):
++        dump_started = time.perf_counter()
+         agent._dump_api_request_debug(api_kwargs, reason="preflight")
++        _emit_conversation_timing(agent, "request_dump", dump_started, **timing_meta)
+ 
+     # Private to the in-process MoA facade; added after middleware/hooks/debug dumps so
+     # none serializes it into the provider payload. Re-read the live client:
+--- a/agent/turn_response_check.py
++++ b/agent/turn_response_check.py
+@@ -120,7 +120,13 @@
+         resp_model = getattr(response, 'model', 'N/A') if response else 'N/A'
+         logging.debug(f"API Response received - Model: {resp_model}, Usage: {response.usage if hasattr(response, 'usage') else 'N/A'}")
+ 
++    from agent_runtime.conversation_observability import _emit_conversation_timing
++    validation_started = time.perf_counter()
+     response_invalid, error_details = validate_response_shape(agent, response)
++    _emit_conversation_timing(agent, "response_validate", validation_started,
++        status="failed" if response_invalid else "completed",
++        error_detail_count=len(error_details), api_call_count=api_call_count,
++        api_mode=agent.api_mode, provider=agent.provider, model=agent.model)
+     if response_invalid:
+         _iv = retry_invalid_response(
+             agent, response=response, error_details=error_details, _retry=_retry,
+--- a/agent/turn_response_intake.py
++++ b/agent/turn_response_intake.py
+@@ -147,7 +147,18 @@
+             agent._vprint(f"{agent.log_prefix}🤖 Assistant: {content}")
+         else:
+             agent._vprint(f"{agent.log_prefix}🤖 Assistant: {content[:100]}{'...' if len(content) > 100 else ''}")
+-    if content and agent.tool_progress_callback:
++    native_reasoning = ""
++    if agent.tool_progress_callback and getattr(agent, "_delegate_depth", 0) == 0:
++        try:
++            native_reasoning = (agent._extract_reasoning(assistant_message) or "").strip()
++        except Exception:
++            pass
++    if native_reasoning:
++        try:
++            agent.tool_progress_callback("reasoning.available", "_thinking", native_reasoning[:500], None)
++        except Exception:
++            pass
++    elif content and agent.tool_progress_callback:
+         _relay_thinking(agent, content)
+ 
+     # Incomplete <REASONING_SCRATCHPAD> (opened, never closed): the model ran out of
+--- a/agent/turn_usage.py
++++ b/agent/turn_usage.py
+@@ -171,6 +171,8 @@
+     agent.session_cache_read_tokens += canonical_usage.cache_read_tokens
+     agent.session_cache_write_tokens += canonical_usage.cache_write_tokens
+     agent.session_reasoning_tokens += canonical_usage.reasoning_tokens
++    from agent.usage_pricing import record_api_call_usage
++    record_api_call_usage(agent, canonical_usage)
+     # Rolling history for status-bar averages (last 10).
+     with suppress(Exception):
+         hist = getattr(agent, "_api_latency_history", None)
+@@ -194,11 +196,12 @@
+     _upstream = getattr(response, "provider", None)
+     if isinstance(_upstream, str) and _upstream:
+         _ident += f" upstream={_upstream}"
++    from agent_runtime.conversation_observability import _format_ttfb_token
+     logger.info(
+-        "API call #%d: model=%s provider=%s in=%d out=%d total=%d latency=%.1fs%s%s",
++        "API call #%d: model=%s provider=%s in=%d out=%d total=%d latency=%.1fs%s%s%s",
+         agent.session_api_calls, agent.model, agent.provider or "unknown",
+         prompt_tokens, completion_tokens, total_tokens,
+-        api_duration, _cache_pct, _ident,
++        api_duration, _cache_pct, _ident, _format_ttfb_token(getattr(agent, "_fork_first_byte_s", None)),
+     )
+     # nous.anthropic_wire=auto: the session's wire is decided once, from this first response.
+     if agent.session_api_calls == 1 and (agent.provider or "") == "nous":
+--- a/hermes_cli/doctor.py
++++ b/hermes_cli/doctor.py
+@@ -12,12 +12,7 @@
+ from hermes_constants import display_hermes_home
+ 
+ PROJECT_ROOT = get_project_root()
+-HERMES_HOME = get_hermes_home()
+ _DHH = display_hermes_home()  # user-facing display path (e.g. ~/.hermes or ~/.hermes/profiles/coder)
+-
+-# Load environment variables from ~/.hermes/.env so API key checks work
+-_env_path = get_env_path()
+-load_hermes_dotenv(hermes_home=_env_path.parent, project_env=PROJECT_ROOT / ".env")
+ 
+ from hermes_cli.colors import Colors, color
+ from hermes_cli.doctor_report import Finding, _section, check_bool, check_info, doctor_check, warn_on_error
+@@ -106,7 +101,10 @@
+ 
+ 
+ # Ordered (section title, check). None title = check prints its own header (or none); order is user-visible.
++from agent_runtime.doctor_extensions import check_gateway_launcher, _check_gateway_launcher_interpreter
++
+ DOCTOR_CHECKS = (
++    (None, check_gateway_launcher),
+     ('Security Advisories', _check_security_advisories), ('MCP Server Security', _check_mcp_security),
+     ('Python Environment', _check_python_environment), ('SSL / CA Certificates', _check_certificates),
+     ('Required Packages', _check_required_packages), ('Configuration Files', _check_env_file),
+@@ -160,8 +158,10 @@
+     print()
+ 
+ 
+-def run_doctor(args):
++def _run_doctor(args):
+     """Run diagnostic checks."""
++    env_path = get_env_path()
++    load_hermes_dotenv(hermes_home=env_path.parent, project_env=PROJECT_ROOT / ".env")
+     should_fix = getattr(args, 'fix', False)
+     # Doctor runs from the interactive CLI, so CLI-gated tool checks (e.g. cronjob) see the same context.
+     os.environ.setdefault("HERMES_INTERACTIVE", "1")
+@@ -234,3 +234,10 @@
+     warn_once(__name__, name, *target)
+     return getattr(importlib.import_module(target[0]), target[1])
+ # ---- END PLUGIN-COMPAT ----
++
++
++def run_doctor(args, *, agent_browser_runnable_override=None):
++    """Resolve the selected home when invoked and scope optional test probes to this call."""
++    from agent_runtime.doctor_extensions import browser_probe_scope
++    with browser_probe_scope(agent_browser_runnable_override):
++        return _run_doctor(args)
+--- a/hermes_cli/doctor_config.py
++++ b/hermes_cli/doctor_config.py
+@@ -131,7 +131,9 @@
+ @doctor_check()
+ def _check_env_file(should_fix: bool, f: Finding) -> None:
+     """Managed scope plus ~/.hermes/.env presence and provider credentials."""
+-    from hermes_cli.doctor import HERMES_HOME, PROJECT_ROOT, _DHH
++    from hermes_cli.doctor import PROJECT_ROOT, _DHH
++    from hermes_cli.config import get_hermes_home
++    HERMES_HOME = get_hermes_home()
+     managed_scope_check()
+     env_path = HERMES_HOME / '.env'
+     if env_path.exists():
+@@ -263,7 +265,9 @@
+ @doctor_check()
+ def _check_config_file(should_fix: bool, f: Finding) -> None:
+     """config.yaml presence (project cli-config.yaml as fallback); model/provider validation."""
+-    from hermes_cli.doctor import HERMES_HOME, PROJECT_ROOT, _DHH
++    from hermes_cli.doctor import PROJECT_ROOT, _DHH
++    from hermes_cli.config import get_hermes_home
++    HERMES_HOME = get_hermes_home()
+     config_path = HERMES_HOME / 'config.yaml'
+     if config_path.exists():
+         check_ok(f"{_DHH}/config.yaml exists")
+@@ -397,7 +401,8 @@
+ 
+     Each step is independent and best-effort: a failure in one never hides the next.
+     """
+-    from hermes_cli.doctor import HERMES_HOME
++    from hermes_cli.config import get_hermes_home
++    HERMES_HOME = get_hermes_home()
+     config_path = HERMES_HOME / 'config.yaml'
+     if not config_path.exists():
+         config_path = None
+--- a/hermes_cli/doctor_live.py
++++ b/hermes_cli/doctor_live.py
+@@ -52,7 +52,9 @@
+     if shutil.which("agent-browser"):
+         return True
+     try:
+-        from hermes_cli.doctor import HERMES_HOME, PROJECT_ROOT
++        from hermes_cli.doctor import PROJECT_ROOT
++        from hermes_cli.config import get_hermes_home
++        HERMES_HOME = get_hermes_home()
+         if (PROJECT_ROOT / "node_modules" / "agent-browser").exists():
+             return True
+         for candidate in (HERMES_HOME / "node" / "bin", HERMES_HOME / "node", HERMES_HOME / "node_modules" / ".bin"):
+--- a/hermes_cli/doctor_platform.py
++++ b/hermes_cli/doctor_platform.py
+@@ -91,7 +91,8 @@
+ 
+ def _report_database_journal_modes(hermes_home: Path | None = None, version_info: tuple[int, ...] | None = None) -> None:
+     """List each database's journal mode; warn on WAL under a vulnerable SQLite."""
+-    from hermes_cli.doctor import HERMES_HOME
++    from hermes_cli.config import get_hermes_home
++    HERMES_HOME = get_hermes_home()
+     from hermes_state_wal import _wal_reset_repair_hint, is_sqlite_wal_reset_vulnerable
+     vulnerable = is_sqlite_wal_reset_vulnerable(version_info)
+     try:
+--- a/hermes_cli/doctor_state.py
++++ b/hermes_cli/doctor_state.py
+@@ -25,7 +25,8 @@
+ 
+ def _doctor_memory_config(hermes_home: Path | None = None) -> dict:
+     """Return the effective memory section used by doctor diagnostics."""
+-    from hermes_cli.doctor import HERMES_HOME
++    from hermes_cli.config import get_hermes_home
++    HERMES_HOME = get_hermes_home()
+     try:
+         from hermes_cli.config_effective import load_user_config_effective
+         config_path = (hermes_home if hermes_home is not None else HERMES_HOME) / "config.yaml"
+@@ -108,7 +109,9 @@
+ @doctor_check()
+ def _check_directory_structure(should_fix: bool, f: Finding) -> None:
+     """HERMES_HOME, expected subdirs, SOUL.md, and the enabled built-in memory files."""
+-    from hermes_cli.doctor import HERMES_HOME, _DHH
++    from hermes_cli.doctor import _DHH
++    from hermes_cli.config import get_hermes_home
++    HERMES_HOME = get_hermes_home()
+     hermes_home = HERMES_HOME
+     ensure_dir(f, should_fix, hermes_home, f"{_DHH} directory exists", f"Created {_DHH} directory", f"{_DHH} not found")
+     _memory_enabled, _user_profile_enabled = _memory_store_flags(hermes_home)
+@@ -288,7 +291,9 @@
+ @doctor_check()
+ def _check_state_db(should_fix: bool, f: Finding) -> None:
+     """state.db session count, FTS write health, schema repair, stats snapshot, WAL size."""
+-    from hermes_cli.doctor import HERMES_HOME, _DHH
++    from hermes_cli.doctor import _DHH
++    from hermes_cli.config import get_hermes_home
++    HERMES_HOME = get_hermes_home()
+     state_db_path = HERMES_HOME / "state.db"
+     if state_db_path.exists():
+         _state_db_health(f, should_fix, state_db_path, _DHH)
+@@ -314,7 +319,9 @@
+ 
+ @doctor_check()
+ def _check_skills_hub(should_fix: bool, f: Finding) -> None:
+-    from hermes_cli.doctor import HERMES_HOME, _DHH
++    from hermes_cli.doctor import _DHH
++    from hermes_cli.config import get_hermes_home
++    HERMES_HOME = get_hermes_home()
+     hub_dir = HERMES_HOME / "skills" / ".hub"
+     if check_bool(hub_dir.exists(), "Skills Hub directory exists", ("Skills Hub directory not initialized", "(run: hermes skills list)")):
+         lock_file = hub_dir / "lock.json"
+@@ -393,7 +400,8 @@
+ 
+ @doctor_check()
+ def _check_memory_provider(should_fix: bool, f: Finding) -> None:
+-    from hermes_cli.doctor import HERMES_HOME
++    from hermes_cli.config import get_hermes_home
++    HERMES_HOME = get_hermes_home()
+     name = _doctor_memory_config(HERMES_HOME).get("provider", "")
+     if not name:
+         check_ok("Built-in memory active", "(no external provider configured — this is fine)")
+--- a/hermes_cli/doctor_tools.py
++++ b/hermes_cli/doctor_tools.py
+@@ -280,7 +280,8 @@
+             check_info("  Warmed npx cache for agent-browser" if warm_agent_browser_npx_cache()
+                        else "  Could not warm npx cache (offline or npx unavailable)")
+         return True
+-    if resolved and agent_browser_runnable(resolved):
++    from agent_runtime.doctor_extensions import browser_runnable
++    if resolved and browser_runnable(resolved, agent_browser_runnable):
+         check_ok("agent-browser", "(browser automation)")
+         return True
+     if resolved:
+--- a/hermes_cli/web_server.py
++++ b/hermes_cli/web_server.py
+@@ -1863,3 +1863,6 @@
+     warn_once(__name__, name, *target)
+     return getattr(importlib.import_module(target[0]), target[1])
+ # ---- END PLUGIN-COMPAT ----
++
++# Permanent fork endpoint compatibility; the implementation stays in its router.
++from hermes_cli.web_routers.profiles import promote_profile_endpoint
+--- a/hermes_cli/web_server_config.py
++++ b/hermes_cli/web_server_config.py
+@@ -169,6 +169,7 @@
+ # (models_dev, onboarding, mcp, computer_use, telemetry, plugins, doctor, runtime, session,
+ # nous, telegram) currently surface a single schema field each.
+ _CATEGORY_MERGE: Dict[str, str] = {
++    "charsheet": "agent",
+     "privacy": "security",
+     "context": "agent",
+     "skills": "agent",
+--- a/hermes_cli/web_server_oauth.py
++++ b/hermes_cli/web_server_oauth.py
+@@ -134,37 +134,14 @@
+ # providers appear automatically. Also carries two non-catalog rows the Accounts tab needs:
+ # the Anthropic credential-status card and the synthetic ``claude-code`` row.
+ # ``flow``: ``device_code`` = show code + URL + poll; ``external`` = delegated to a terminal/CLI.
+-_OAUTH_PROVIDER_CATALOG: tuple[Dict[str, Any], ...] = (
+-    # status_fn None → dispatched via auth.get_<provider>_auth_status.
+-    {"id": "nous", "name": "Nous Portal", "flow": "device_code", "cli_command": "hermes auth add nous",
+-     "docs_url": "https://portal.nousresearch.com", "status_fn": None},
+-    {"id": "openai-codex", "name": "ChatGPT or Codex Subscription", "flow": "device_code",
+-     "cli_command": "hermes auth add openai-codex", "docs_url": "https://platform.openai.com/docs",
+-     "status_fn": None},
+-    {"id": "qwen-oauth", "name": "Qwen (via Qwen CLI)", "flow": "external",
+-     "cli_command": "hermes auth add qwen-oauth", "docs_url": "https://github.com/QwenLM/qwen-code",
+-     "status_fn": None},
+-    # Structurally device-code (verification URI + user code + token polling) with a PKCE
+-    # code-binding extension that doesn't change the operator UX.
+-    {"id": "minimax-oauth", "name": "MiniMax (OAuth)", "flow": "device_code",
+-     "cli_command": "hermes auth add minimax-oauth", "docs_url": "https://www.minimax.io", "status_fn": None},
+-    # Device code works in remote shells/containers without a reachable 127.0.0.1 callback.
+-    {"id": "xai-oauth", "name": "xAI Grok OAuth (SuperGrok / Premium+)", "flow": "device_code",
+-     "cli_command": "hermes auth add xai-oauth",
+-     "docs_url": "https://hermes-agent.nousresearch.com/docs/guides/xai-grok-oauth", "status_fn": None},
+-    # `copilot login` is the non-interactive subcommand; `copilot /login` is not valid
+-    # (slash-commands only exist inside an interactive session).
+-    {"id": "copilot-acp", "name": "GitHub Copilot (ACP)", "flow": "external", "cli_command": "copilot login",
+-     "docs_url": "https://docs.github.com/en/copilot", "status_fn": _copilot_acp_status},
+-    # Anthropic / Claude entries sit at the bottom. Deliberately flow == "external": an
+-    # in-dashboard Connect button would let a scriptable HTTP endpoint mint Claude Pro/Max
+-    # subscription tokens outside Anthropic's own client, against its OAuth usage policies.
+-    # Login works via the terminal (`hermes auth add anthropic`) or a plain API key.
+-    {"id": "anthropic", "name": "Anthropic API Key", "flow": "external", "cli_command": "hermes auth add anthropic",
+-     "docs_url": "https://docs.claude.com/en/api/getting-started", "status_fn": _anthropic_oauth_status},
+-    {"id": "claude-code", "name": "Anthropic OAuth: Required Extra Usage Credits to Use Subscription",
+-     "flow": "external", "cli_command": "claude setup-token",
+-     "docs_url": "https://docs.claude.com/en/docs/claude-code", "status_fn": _claude_code_only_status},
++from hermes_cli.provider_catalog import OAUTH_FLOW_OVERRIDES
++_OAUTH_STATUS_FNS = {
++    "copilot-acp": _copilot_acp_status,
++    "anthropic": _anthropic_oauth_status,
++    "claude-code": _claude_code_only_status,
++}
++_OAUTH_PROVIDER_CATALOG: tuple[Dict[str, Any], ...] = tuple(
++    {**row, "status_fn": _OAUTH_STATUS_FNS.get(row["id"])} for row in OAUTH_FLOW_OVERRIDES
+ )
+ _oauth_sessions: Dict[str, Dict[str, Any]] = {}
+ _oauth_sessions_lock = threading.Lock()
+--- a/hermes_cli/web_routers/oauth.py
++++ b/hermes_cli/web_routers/oauth.py
+@@ -513,19 +513,8 @@
+ 
+ 
+ def _oauth_provider_disconnect_command(provider: Dict[str, Any]) -> Optional[str]:
+-    """Shell command that clears an external provider's credentials, or None.
+-
+-    The disconnect API never silently deletes files another CLI owns; the GUI runs
+-    this in its embedded terminal so the user sees exactly what executes. Claude Code
+-    has no scriptable logout, so remove what logout would: the macOS Keychain entry
+-    and/or ``~/.claude/.credentials.json`` (the two ``read_claude_code_credentials()`` sources).
+-    """
+-    if provider.get("flow") != "external" or provider.get("id") != "claude-code":
+-        return None
+-    rm_file = "rm -f ~/.claude/.credentials.json"
+-    if sys.platform == "darwin":
+-        return f'security delete-generic-password -s "Claude Code-credentials" 2>/dev/null; {rm_file}'
+-    return rm_file
++    from hermes_cli.provider_catalog import disconnect_command_for
++    return disconnect_command_for(provider.get("id", ""), provider.get("flow", ""))
+ 
+ 
+ def _oauth_provider_disconnect_hint(provider: Dict[str, Any], status: Dict[str, Any]) -> Optional[str]:
+--- a/hermes_cli/provider_catalog.py
++++ b/hermes_cli/provider_catalog.py
+@@ -115,3 +115,189 @@
+ def provider_catalog_by_slug() -> dict[str, ProviderDescriptor]:
+     """Convenience: the catalog keyed by slug."""
+     return {d.slug: d for d in provider_catalog()}
++
++
++# ---------------------------------------------------------------------------
++# Login-flow metadata (hoisted 2026-08-16, plan PL-1)
++# ---------------------------------------------------------------------------
++#
++# These rows used to live ONLY inside ``hermes_cli/web_server.py`` as
++# ``_OAUTH_PROVIDER_CATALOG`` — welded to the FastAPI dashboard process, and so
++# unreachable from any surface that does not run it (the Launcher runs a local
++# ``hermes`` CLI, never the dashboard). The module docstring above already names
++# that tuple as one of the hand-maintained lists this module exists to unify, so
++# the DATA moves here and web_server keeps only the binding of its per-provider
++# ``status_fn`` callables (which are dashboard presentation, not identity).
++#
++# ``flow`` describes the login SHAPE so any client can pick the right UI:
++#   ``pkce``        — open a URL, paste the callback code back
++#   ``device_code`` — show a user code + verification URI, poll for the token
++#   ``external``    — delegated to a third-party CLI; Hermes only reads it
++#
++# Two rows are deliberately NOT catalog providers but must still be offered as
++# sign-ins: the Anthropic PKCE card and the synthetic ``claude-code``
++# subscription row.
++OAUTH_FLOW_OVERRIDES: tuple[dict, ...] = ({'id': 'nous',
++  'name': 'Nous Portal',
++  'flow': 'device_code',
++  'cli_command': 'hermes auth add nous',
++  'docs_url': 'https://portal.nousresearch.com'},
++ {'id': 'openai-codex',
++  'name': 'ChatGPT or Codex Subscription',
++  'flow': 'device_code',
++  'cli_command': 'hermes auth add openai-codex',
++  'docs_url': 'https://platform.openai.com/docs'},
++ {'id': 'qwen-oauth',
++  'name': 'Qwen (via Qwen CLI)',
++  'flow': 'external',
++  'cli_command': 'hermes auth add qwen-oauth',
++  'docs_url': 'https://github.com/QwenLM/qwen-code'},
++ {'id': 'minimax-oauth',
++  'name': 'MiniMax (OAuth)',
++  'flow': 'device_code',
++  'cli_command': 'hermes auth add minimax-oauth',
++  'docs_url': 'https://www.minimax.io'},
++ {'id': 'xai-oauth',
++  'name': 'xAI Grok OAuth (SuperGrok / Premium+)',
++  'flow': 'device_code',
++  'cli_command': 'hermes auth add xai-oauth',
++  'docs_url': 'https://hermes-agent.nousresearch.com/docs/guides/xai-grok-oauth'},
++ {'id': 'copilot-acp',
++  'name': 'GitHub Copilot (ACP)',
++  'flow': 'external',
++  'cli_command': 'copilot login',
++  'docs_url': 'https://docs.github.com/en/copilot'},
++ {'id': 'anthropic',
++  'name': 'Anthropic API Key',
++  'flow': 'external',
++  'cli_command': 'hermes auth add anthropic',
++  'docs_url': 'https://docs.claude.com/en/api/getting-started'},
++ {'id': 'claude-code',
++  'name': 'Anthropic OAuth: Required Extra Usage Credits to Use Subscription',
++  'flow': 'external',
++  'cli_command': 'claude setup-token',
++  'docs_url': 'https://docs.claude.com/en/docs/claude-code'})
++
++
++# Lanes whose models live under a DIFFERENT models.dev catalog id. Seeded from
++# the map the Launcher hardcoded (hand-verified 2026-07-08) so the mapping now
++# drifts with the fork that owns the lanes instead of with the client.
++MODELS_DEV_LANE_IDS: dict[str, str] = {
++    "openai-codex": "openai",
++    "opencode-zen": "opencode",
++    "xai-oauth": "xai",
++    "minimax-oauth": "minimax",
++    "qwen-oauth": "alibaba",
++}
++
++
++def models_dev_id_for(slug: str) -> str:
++    """The models.dev catalog id serving ``slug``'s model list.
++
++    Defaults to the slug itself — most lanes ARE their catalog id; only the
++    hermes-specific OAuth lanes above need redirecting.
++    """
++    return MODELS_DEV_LANE_IDS.get(slug, slug)
++
++
++def disconnect_command_for(slug: str, flow: str) -> str | None:
++    """The documented command that clears an EXTERNAL provider's credentials.
++
++    External providers store credentials outside Hermes, so Hermes never
++    deletes them behind a silent API call — it hands the operator the exact
++    command instead. Returns None for providers we cannot safely clear (the UI
++    shows a manual hint) and for every non-external flow.
++
++    Claude Code has no scriptable logout (only the interactive ``/logout``), so
++    the command removes the same two sources ``read_claude_code_credentials()``
++    consults.
++    """
++    if flow != "external":
++        return None
++    if slug == "claude-code":
++        import sys as _sys
++
++        rm_file = "rm -f ~/.claude/.credentials.json"
++        if _sys.platform == "darwin":
++            return (
++                'security delete-generic-password -s "Claude Code-credentials" '
++                f"2>/dev/null; {rm_file}"
++            )
++        return rm_file
++    return None
++
++
++def provider_login_catalog() -> list[dict]:
++    """Every CONNECTABLE provider, whether or not a credential exists for it.
++
++    This is the block that makes "never configured" representable. A client
++    that builds its provider roster from credentials-present + logins-present
++    (which is what every hermes client did before this existed) can render
++    "this key is dead" but literally cannot render "you could connect this" —
++    the two states collapse into the same absence-of-models.
++
++    MEMBERSHIP is the union of the whole ``provider_catalog()`` universe (the
++    set ``hermes model`` offers) and [OAUTH_FLOW_OVERRIDES] — the latter adds
++    the two synthetic sign-in rows that are not catalog providers. Order:
++    catalog order first, then any override-only rows.
++
++    Each row: ``{id, name, flows, key_var, models_dev_id, docs_url,
++    disconnect_command}``. NEVER a credential value — this block describes what
++    CAN be connected, never what is stored.
++    """
++    overrides = {row["id"]: row for row in OAUTH_FLOW_OVERRIDES}
++    rows: list[dict] = []
++    seen: set[str] = set()
++
++    def _emit(
++        slug: str, name: str, default_flow: str, key_var: str | None, docs_url: str
++    ) -> None:
++        if slug in seen:
++            return
++        seen.add(slug)
++        override = overrides.get(slug)
++        flow = (override or {}).get("flow") or default_flow
++        # `flows` is a LIST because a lane can legitimately offer more than one
++        # entrance — anthropic takes a pasted API key OR the PKCE sign-in — and
++        # a client that only knows one of them offers a dead affordance.
++        flows = [flow]
++        if key_var and flow != "api_key":
++            flows.append("api_key")
++        rows.append(
++            {
++                "id": slug,
++                "name": (override or {}).get("name") or name or slug,
++                "flows": flows,
++                "key_var": key_var,
++                "models_dev_id": models_dev_id_for(slug),
++                "docs_url": (override or {}).get("docs_url") or docs_url or None,
++                "disconnect_command": disconnect_command_for(slug, flow),
++            }
++        )
++
++    for descriptor in provider_catalog():
++        key_var = (
++            descriptor.api_key_env_vars[0] if descriptor.api_key_env_vars else None
++        )
++        _emit(
++            descriptor.slug,
++            descriptor.label,
++            _default_flow_for(descriptor.auth_type),
++            key_var,
++            descriptor.signup_url,
++        )
++    for row in OAUTH_FLOW_OVERRIDES:
++        _emit(row["id"], row["name"], row["flow"], None, row["docs_url"])
++    return rows
++
++
++def _default_flow_for(auth_type: str) -> str:
++    """Login shape implied by a provider's ``auth_type`` when no override row
++    names one explicitly."""
++    if auth_type == "oauth_device_code":
++        return "device_code"
++    if auth_type in {"oauth_external", "external_process", "copilot"}:
++        return "external"
++    if auth_type.startswith("oauth"):
++        return "pkce"
++    return "api_key"
+--- /dev/null
++++ b/agent_runtime/auth_extensions.py
+@@ -0,0 +1,192 @@
++"""Fork-owned credential selection state and read-only Codex readiness.
++
++Credentials and locking remain owned by hermes_cli.auth. This module owns only
++selection sidecars and the downstream profile-readiness policy.
++"""
++from __future__ import annotations
++import json
++import logging
++import os
++import stat
++import uuid
++from datetime import datetime, timezone
++from pathlib import Path
++from typing import Any, Dict
++from hermes_cli import auth
++from hermes_cli.auth_constants import AuthError
++from hermes_constants import secure_parent_dir
++from utils import atomic_replace
++
++logger = logging.getLogger(__name__)
++ROTATION_STATE_VERSION = 1
++
++def _rotation_state_path() -> Path:
++    """Sidecar path for pool selection state, beside the active auth store.
++
++    Derived from ``auth._auth_file_path()`` on purpose: it inherits that function's
++    pytest seat belt, so a test that forgot to sandbox ``HERMES_HOME`` cannot
++    write rotation state into the real user's Hermes root either.
++    """
++    return auth._auth_file_path().with_name("credential_rotation.json")
++
++
++def _empty_rotation_state() -> Dict[str, Any]:
++    return {"version": ROTATION_STATE_VERSION, "providers": {}}
++
++
++def _load_rotation_state() -> Dict[str, Any]:
++    """Read the rotation sidecar. Never raises; a damaged file starts empty.
++
++    Rotation state is reconstructible by definition — losing it costs one
++    provider one selection slot, never a credential — so an unreadable sidecar
++    degrades to "start from the first entry" instead of failing a runtime
++    resolution.
++    """
++    path = _rotation_state_path()
++    if not path.exists():
++        return _empty_rotation_state()
++    try:
++        raw = json.loads(path.read_text(encoding="utf-8"))
++    except Exception as exc:
++        logger.warning(
++            "auth: failed to parse %s (%s) — restarting credential rotation "
++            "from the first entry",
++            path, exc,
++        )
++        return _empty_rotation_state()
++    if not isinstance(raw, dict) or not isinstance(raw.get("providers"), dict):
++        return _empty_rotation_state()
++    return raw
++
++
++def read_pool_rotation_state(provider_id: str) -> Dict[str, Any]:
++    """Return one provider's persisted selection state as a plain dict.
++
++    No global-root fallback, deliberately: a profile that borrows another
++    store's CREDENTIALS still rotates on its own. Sharing the cursor would let
++    one profile consume another's rotation slots, and the fallback store is
++    read-only for this process anyway.
++    """
++    providers = _load_rotation_state().get("providers")
++    if not isinstance(providers, dict):
++        return {}
++    slice_ = providers.get((provider_id or "").strip().lower())
++    return dict(slice_) if isinstance(slice_, dict) else {}
++
++
++def _write_rotation_state_file(store: Dict[str, Any]) -> Path:
++    """Atomic 0600 write of the whole sidecar, mirroring ``_save_auth_store``."""
++    path = _rotation_state_path()
++    path.parent.mkdir(parents=True, exist_ok=True)
++    secure_parent_dir(path)
++    payload = json.dumps(store, indent=2) + "\n"
++    tmp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
++    try:
++        fd = os.open(
++            str(tmp_path),
++            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
++            stat.S_IRUSR | stat.S_IWUSR,
++        )
++        with os.fdopen(fd, "w", encoding="utf-8") as handle:
++            handle.write(payload)
++            handle.flush()
++            os.fsync(handle.fileno())
++        atomic_replace(tmp_path, path)
++    finally:
++        try:
++            if tmp_path.exists():
++                tmp_path.unlink()
++        except OSError:
++            pass
++    return path
++
++
++def write_pool_rotation_state(provider_id: str, state: Dict[str, Any]) -> Path:
++    """Persist one provider's selection state, leaving auth.json untouched.
++
++    Takes the auth store lock so rotation writes serialize against credential
++    writes under the existing lock ordering rather than introducing a second
++    one. An empty ``state`` drops the provider's slice, so a pool that stops
++    rotating does not leave a row behind forever.
++    """
++    key = (provider_id or "").strip().lower()
++    with auth._auth_store_lock():
++        store = _load_rotation_state()
++        providers = store.get("providers")
++        if not isinstance(providers, dict):
++            providers = {}
++            store["providers"] = providers
++        if state:
++            providers[key] = dict(state)
++        else:
++            providers.pop(key, None)
++        store["version"] = ROTATION_STATE_VERSION
++        store["updated_at"] = datetime.now(timezone.utc).isoformat()
++        return _write_rotation_state_file(store)
++
++
++def _read_global_codex_tokens_if_usable() -> Dict[str, Any] | None:
++    """Return usable global-root Codex singleton tokens for profile fallback."""
++    try:
++        global_store = auth._load_global_auth_store()
++        providers = global_store.get("providers") if isinstance(global_store, dict) else None
++        state = providers.get("openai-codex") if isinstance(providers, dict) else None
++        tokens = state.get("tokens") if isinstance(state, dict) else None
++        if not isinstance(tokens, dict):
++            return None
++        access_token = str(tokens.get("access_token", "") or "").strip()
++        refresh_token = str(tokens.get("refresh_token", "") or "").strip()
++        if not access_token or not refresh_token:
++            return None
++        return {"access_token": access_token, "refresh_token": refresh_token, "last_refresh": state.get("last_refresh")}
++    except Exception:
++        logger.debug("Global Codex singleton fallback lookup failed", exc_info=True)
++        return None
++
++
++def codex_auth_store_credentials_present() -> bool:
++    """Would :func:`resolve_codex_runtime_credentials` find a credential to serve?
++
++    A READ-ONLY mirror of that function's credential SOURCES, in its order,
++    minus every branch that spends something: no token refresh, no network
++    probe of the Codex usage endpoint, no CLI import, no write to ``auth.json``
++    and no clearing of a pool cooldown. It answers only "is there a credential
++    here that the run path would hand to a turn", which is the question a
++    readiness pass is entitled to ask.
++
++    Why it exists as its OWN function rather than as a keyword on the resolver:
++    the resolver's write/network branches are reached exactly when the
++    singleton is unusable — the case readiness cares most about — so
++    ``refresh_if_expiring=False`` is not sufficient to make it a read, and a
++    reader would have to prove that from three nested branches rather than
++    from a name.
++
++    An access token past its expiry with a refresh token beside it counts as
++    PRESENT: the run path refreshes it and serves the turn, so reporting
++    attention for it would be reporting a condition the runtime does not have.
++    Whether that refresh succeeds is only knowable over the network, which this
++    function is defined not to do.
++    """
++
++    try:
++        auth._read_codex_tokens()
++        return True
++    except AuthError:
++        pass
++    except Exception:
++        logger.debug("Codex singleton readiness read failed", exc_info=True)
++        return False
++
++    # The resolver's global-root singleton fallback. Its OTHER fallback —
++    # ``_pool_codex_access_token`` — is deliberately NOT mirrored here: it is a
++    # second, looser read of the same credential pool the readiness caller has
++    # already asked with the pool's own availability rules, and it accepts an
++    # entry that those rules just refused (it consults only
++    # ``last_error_reset_at``, never the ``last_status`` cooldown). Mirroring it
++    # would mean readiness could never report attention while any pool row held
++    # any token string, including a long-dead one — which would retire the true
++    # positive along with the false one. Where the two pool reads disagree,
++    # readiness follows the stricter, and says so rather than leaving a reader
++    # to discover the divergence.
++    return bool(_read_global_codex_tokens_if_usable())
++
+--- /dev/null
++++ b/agent_runtime/session_extensions.py
+@@ -0,0 +1,64 @@
++"""Fork-specific native compression lineage deletion for SessionDB."""
++import json
++from pathlib import Path
++from typing import List, Optional
++
++
++class RuntimeSessionMixin:
++    def delete_compression_lineage(
++        self,
++        root_session_id: str,
++        sessions_dir: Optional[Path] = None,
++    ) -> List[str]:
++        """Delete a root and only its native compression continuation chain.
++
++        Explicit branches, delegate sessions, and tool children are preserved
++        and detached, matching ``delete_session``'s public child semantics.
++        """
++
++        removed: List[str] = []
++
++        def _do(conn):
++            rows = conn.execute(
++                "SELECT id, parent_session_id, end_reason, model_config FROM sessions"
++            ).fetchall()
++            by_id = {row["id"]: row for row in rows}
++            if root_session_id not in by_id:
++                return []
++            lineage = {root_session_id}
++            changed = True
++            while changed:
++                changed = False
++                for row in rows:
++                    if row["id"] in lineage or row["parent_session_id"] not in lineage:
++                        continue
++                    parent = by_id.get(row["parent_session_id"])
++                    try:
++                        meta = json.loads(row["model_config"] or "{}")
++                    except Exception:
++                        meta = {}
++                    if (
++                        parent is not None
++                        and parent["end_reason"] == "compression"
++                        and not meta.get("_branched_from")
++                        and not meta.get("_delegate_from")
++                    ):
++                        lineage.add(row["id"])
++                        changed = True
++            ids = sorted(lineage)
++            placeholders = ",".join("?" for _ in ids)
++            conn.execute(
++                f"UPDATE sessions SET parent_session_id = NULL "
++                f"WHERE parent_session_id IN ({placeholders}) AND id NOT IN ({placeholders})",
++                tuple(ids + ids),
++            )
++            conn.execute(f"DELETE FROM messages WHERE session_id IN ({placeholders})", tuple(ids))
++            conn.execute(f"DELETE FROM sessions WHERE id IN ({placeholders})", tuple(ids))
++            removed.extend(ids)
++            return ids
++
++        self._execute_write(_do)
++        for session_id in removed:
++            self._remove_session_files(sessions_dir, session_id)
++        return removed
++
+--- /dev/null
++++ b/agent_runtime/auxiliary_probe.py
+@@ -0,0 +1,111 @@
++"""Context-local availability probes and client construction accounting."""
++import contextlib
++import contextvars
++import threading
++from typing import Any
++
++_capability_probe_active: contextvars.ContextVar[bool] = contextvars.ContextVar(
++    "aux_capability_probe_active", default=False
++)
++_client_construction_count = 0
++_client_construction_lock = threading.Lock()
++
++
++def _note_client_construction() -> None:
++    """Count one real provider-client construction (test/pin seam).
++
++    Covers the auxiliary-client construction seams: every module-level
++    ``OpenAI(...)`` (they all resolve through the proxy below), the async
++    client, and the Anthropic adapter client.
++    """
++
++    global _client_construction_count
++    with _client_construction_lock:
++        _client_construction_count += 1
++
++
++def client_construction_count() -> int:
++    """How many provider clients this process has constructed so far.
++
++    The invariant worth pinning is a DELTA of zero across a capability check —
++    a wall-clock assertion would rot on the first slow CI box.
++    """
++
++    with _client_construction_lock:
++        return _client_construction_count
++
++
++class _CapabilityProbeClient:
++    """Inert stand-in for a provider client, returned only inside a probe.
++
++    Attribute access yields the stand-in again, because thin wrappers read
++    identity fields while they construct (``CodexAuxiliaryClient`` reads
++    ``.api_key`` / ``.base_url``) and a probe that raised there would answer
++    "unavailable" for a backend that IS available — the exact false negative
++    issue #31179 fixed. Calling anything raises: a probe must never reach a
++    wire, and if one of these ever escapes into a real request path we want a
++    loud RuntimeError naming the seam, not a silent hang.
++    """
++
++    __slots__ = ("api_key", "base_url")
++
++    def __init__(self, api_key=None, base_url=None):
++        self.api_key = self if api_key is None else api_key
++        self.base_url = self if base_url is None else base_url
++
++    def __getattr__(self, name: str) -> Any:
++        if name.startswith("__") and name.endswith("__"):
++            raise AttributeError(name)
++        return self
++
++    def __call__(self, *args: Any, **kwargs: Any) -> Any:
++        raise RuntimeError(
++            "capability-probe placeholder client was used to make a request; "
++            "resolve a real client outside capability_probe_scope()"
++        )
++
++    def __bool__(self) -> bool:
++        return True
++
++    def __repr__(self) -> str:
++        return "<capability-probe placeholder client>"
++
++
++_CAPABILITY_PROBE_CLIENT = _CapabilityProbeClient()
++
++
++def capability_probe_active() -> bool:
++    return _capability_probe_active.get()
++
++
++def is_capability_probe_client(candidate: Any) -> bool:
++    """True for the stand-in AND for a thin wrapper built around one.
++
++    The resolver wraps what it builds (``CodexAuxiliaryClient`` /
++    ``AnthropicAuxiliaryClient`` keep the client they were handed on
++    ``_real_client``), so a probe's result is usually a real wrapper object
++    holding an unusable core. Treating only the bare stand-in as "probe
++    output" let such a wrapper reach the shared client cache, where the next
++    REAL caller would have been handed it.
++    """
++
++    if isinstance(candidate, _CapabilityProbeClient):
++        return True
++    return isinstance(getattr(candidate, "_real_client", None), _CapabilityProbeClient)
++
++
++@contextlib.contextmanager
++def capability_probe_scope():
++    """Resolve "is a client available?" without constructing one.
++
++    Scope is per-context (contextvars), so a probe on one thread never turns
++    another thread's real resolution into a stand-in.
++    """
++
++    token = _capability_probe_active.set(True)
++    try:
++        yield
++    finally:
++        _capability_probe_active.reset(token)
++
++
+--- /dev/null
++++ b/agent_runtime/conversation_observability.py
+@@ -0,0 +1,108 @@
++"""Fork turn timing and dispatch receipts, shared by upstream turn phases."""
++import logging
++import time
++from typing import Any, List, Optional
++from hermes_constants import CONVERSATION_REQUEST_ASSEMBLED_STEP
++logger = logging.getLogger(__name__)
++
++def _emit_conversation_timing(
++    agent: Any,
++    step: str,
++    started: float,
++    *,
++    status: str = "completed",
++    **extra: Any,
++) -> int:
++    duration_ms = max(0, int((time.perf_counter() - started) * 1000))
++    callback = getattr(agent, "status_callback", None)
++    if callback is not None:
++        try:
++            callback(
++                {
++                    "type": "run.progress",
++                    "phase": "timing",
++                    "step": f"conversation_{step}",
++                    "status": status,
++                    "summary": f"Conversation {step.replace('_', ' ')} {status} in {duration_ms}ms.",
++                    "duration_ms": duration_ms,
++                    "timing_key": f"conversation_{step}_ms",
++                    **extra,
++                }
++            )
++        except Exception:
++            logger.debug("conversation timing callback failed", exc_info=True)
++    return duration_ms
++
++def _emit_request_assembled_marker(agent: Any, **extra: Any) -> None:
++    """Announce the dispatch instant: every byte hermes will send now exists.
++
++    Not an :func:`_emit_conversation_timing` span — it names an INSTANT, not a
++    duration, so it carries no ``duration_ms``/``timing_key`` (which also keeps
++    it out of the profile-timing dict, whose collector only reads ``*_ms``
++    keys). The mission-chat handler converts it into the ``request_assembled``
++    phase mark (``agent_runtime/mission_chat_phases.py:mark_from_trace_payload``)
++    that splits the turn record's "provider" span into hermes assembly vs
++    genuine client-init + network + provider wait.
++
++    Fired once per PHYSICAL dispatch attempt, right after the transport
++    preflight (so a codex token refresh lands on the hermes side of the split)
++    and right before the provider call. On a retry ladder the consumer's
++    first-mark-wins keeps the first attempt's instant.
++    """
++
++    callback = getattr(agent, "status_callback", None)
++    if callback is None:
++        return
++    try:
++        callback(
++            {
++                "type": "run.progress",
++                "phase": "timing",
++                "step": CONVERSATION_REQUEST_ASSEMBLED_STEP,
++                "status": "reached",
++                "summary": "Provider request assembled; dispatching.",
++                **extra,
++            }
++        )
++    except Exception:
++        logger.debug("request-assembled marker callback failed", exc_info=True)
++
++def _format_ttfb_token(first_byte_s: Optional[float]) -> str:
++    """Render the ``ttfb=`` token for the ``API call #N`` line, or nothing.
++
++    Absent is not zero. ``None`` means no first-byte instant was observed for
++    this response — a non-streaming call, or a stream whose first-delta
++    callback never fired — and an unobserved measurement must vanish from the
++    line rather than print ``ttfb=0.0s``, which reads as an instantaneous
++    provider and is a lie no downstream reader can detect.
++    """
++
++    if first_byte_s is None:
++        return ""
++    return f" ttfb={first_byte_s:.1f}s"
++
++def _first_delta_recorder(
++    cell: List[Optional[float]],
++    dispatch_started: float,
++    on_first_delta: Any,
++) -> Any:
++    """Wrap ``on_first_delta`` so the first firing also times provider TTFB.
++
++    ``dispatch_started`` and the instant taken here are both
++    :func:`time.perf_counter` readings, so the difference is monotonic and
++    cannot go negative or jump on a wall-clock correction.
++
++    First firing wins: providers are free to invoke the delta callback once per
++    token, and TTFB is the FIRST byte, not the latest one. The measurement is
++    taken before the wrapped callback runs so spinner teardown and any
++    thinking-callback work is never charged to the provider — and so the
++    instant survives a callback that raises.
++    """
++
++    def _record() -> None:
++        if cell[0] is None:
++            cell[0] = time.perf_counter() - dispatch_started
++        if on_first_delta is not None:
++            on_first_delta()
++
++    return _record
+--- /dev/null
++++ b/agent_runtime/doctor_extensions.py
+@@ -0,0 +1,73 @@
++"""Downstream diagnostics and context-local browser-probe injection."""
++from contextlib import contextmanager
++from contextvars import ContextVar
++from pathlib import Path
++from hermes_cli.doctor_report import _section, check_fail, check_info, check_ok, check_warn, doctor_check, Finding
++
++_browser_probe = ContextVar("doctor_browser_probe", default=None)
++
++@contextmanager
++def browser_probe_scope(probe):
++    token = _browser_probe.set(probe)
++    try:
++        yield
++    finally:
++        _browser_probe.reset(token)
++
++def browser_runnable(candidate, default):
++    return (_browser_probe.get() or default)(candidate)
++
++def _check_gateway_launcher_interpreter(issues: list[str]) -> None:
++    """Fail when the autostart launcher names an interpreter updates don't sync.
++
++    The Windows launcher is written once at install time and then outlives
++    every process that could notice it is wrong. When it names an interpreter
++    outside the Hermes environment, the gateway boots against a package set no
++    update maintains — and the only symptom is a missing-module traceback at
++    some later boot, which reads as a code bug rather than an install one.
++    Two separate incidents on one install traced back to exactly this: a fatal
++    ``concurrent_log_handler`` import death, and a ``nemo_relay`` traceback
++    that made a fully healthy boot look like a crash.
++    """
++    try:
++        from hermes_cli import gateway_windows
++        from hermes_cli.gateway import (
++            ManagedPythonUnavailable,
++            is_windows,
++            resolve_managed_python,
++        )
++    except Exception as e:
++        check_warn("Gateway launcher interpreter", f"(could not import gateway helpers: {e})")
++        return
++
++    if not is_windows():
++        return
++
++    rendered = gateway_windows.installed_launcher_interpreter()
++    if rendered is None:
++        return
++
++    _section("Gateway Launcher")
++    try:
++        managed = resolve_managed_python()
++    except ManagedPythonUnavailable as exc:
++        check_warn("Could not verify gateway launcher interpreter", f"({exc})")
++        return
++
++    if Path(rendered) == Path(managed):
++        check_ok("Gateway launcher uses the Hermes interpreter", f"({rendered})")
++        return
++
++    check_fail("Gateway launcher uses an unmanaged interpreter", f"(launcher: {rendered})")
++    check_info(f"Hermes is installed into: {managed}")
++    check_info("Dependencies sync into the Hermes environment, not that one, so the")
++    check_info("gateway can die at boot on a missing module. Re-render the launcher:")
++    check_info("  hermes gateway install")
++    issues.append(
++        f"Gateway launcher points at {rendered}, not the Hermes interpreter "
++        f"{managed} — run 'hermes gateway install' from the Hermes environment"
++    )
++
++@doctor_check()
++def check_gateway_launcher(should_fix: bool, f: Finding) -> None:
++    _check_gateway_launcher_interpreter(f.issues)

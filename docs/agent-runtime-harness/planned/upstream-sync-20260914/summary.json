@@ -1,0 +1,43 @@
+{
+  "fork": "34ad8ba33f2508ab10bb24a26f0377ddb62660cb",
+  "upstream": "110baa095bc7135a0624557a9cc35df0f98ece0f",
+  "merge_base": "126ff7071b6b755055879648f4e859b3187d0fac",
+  "fork_tree": "5f5a34ad214d695f5c889a0798e220d175cc91ad",
+  "counts": "1172\t15134",
+  "commits": 1172,
+  "merges": 38,
+  "net_paths": 1541,
+  "net_paths_absent_upstream": 1228,
+  "newly_added_paths_absent_upstream": 1208,
+  "shared_changed_paths": 313,
+  "groups": {
+    "01-build-test-platform": 179,
+    "00-needs-manual-split": 45,
+    "15-documentation": 251,
+    "11-core-tool-seams": 96,
+    "10-conversation": 83,
+    "12-character-assets": 39,
+    "03-auth-config-provider": 83,
+    "05-skills-tools-mcp": 66,
+    "02-runtime-storage": 254,
+    "04-persona-lifecycle": 83,
+    "08-office-board-graph": 54,
+    "09-realm-sync": 46,
+    "07-projections-observability": 87,
+    "06-transport": 108,
+    "14-local-llama": 22,
+    "13-mobile": 45
+  },
+  "authors": {
+    "nekwo <beastant1@gmail.com>": 1138,
+    "Tony Arena <beastant1@gmail.com>": 34
+  },
+  "coauthors": [
+    "Claude Fable 5 <noreply@anthropic.com>",
+    "Claude Fable 5.1 <noreply@anthropic.com>",
+    "Claude Opus 5 (1M context) <noreply@anthropic.com>",
+    "Claude Opus 5 <noreply@anthropic.com>",
+    "Claude Opus <noreply@anthropic.com>",
+    "Claude Sonnet 5 <noreply@anthropic.com>"
+  ]
+}

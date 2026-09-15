@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eternia.local/schemas/mcp-expansion/release_classification.schema.json",
+  "title": "Release classification result",
+  "description": "Return value of arcadia_release_classify. Pure data — no I/O performed by the producer.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "classification",
+    "rubric_version",
+    "blockers",
+    "next_actions",
+    "rationale"
+  ],
+  "properties": {
+    "classification": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "NEEDS_FIX",
+        "FAIL_NON_BLOCKING_TOOLING_PARITY",
+        "NOT_RUN_MISSING_CONTEXT",
+        "REDACTION_FAIL",
+        "ARTIFACT_MISSING"
+      ]
+    },
+    "rubric_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Bump on any change to required-gate matrix or rule cascade."
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["gate", "status", "reason"],
+        "properties": {
+          "gate":   { "type": "string" },
+          "status": { "type": "string", "enum": ["FAIL", "NOT_RUN"] },
+          "reason": { "type": "string", "minLength": 1 },
+          "evidence_path": { "type": "string" }
+        }
+      }
+    },
+    "next_actions": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Ordered, copyable shell-line-or-doctrine bullet steps."
+    },
+    "rationale": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["doctrine_bullets_matched"],
+      "properties": {
+        "doctrine_bullets_matched": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Exact bullet text from Agent QA & Release Doctrine — keeps classifications auditable."
+        },
+        "ignored_gates": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Unknown gates from gate_results[] — surfaced not silently dropped."
+        },
+        "caveat": {
+          "type": "string",
+          "description": "Free text for cases like sqlite_escape_hatch=true or ci_authoritative_local_hang."
+        }
+      }
+    }
+  }
+}

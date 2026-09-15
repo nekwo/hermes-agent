@@ -44,7 +44,7 @@ Rules for tool code:
   `model_tools.py` — see the `browser_navigate` / `execute_code` post-processing blocks.
 - **Paths in schema descriptions use `display_hermes_home()`** (schema is built at import, after
   `_apply_profile_override()` set `HERMES_HOME`). **State files use `get_hermes_home()`**, never
-  `Path.home()/.hermes`, so each profile gets its own state.
+  `Path.home()/.hermes`, and resolve at call time so each profile gets its own state.
 - **No `offset`/`limit` on instructional tools** (skills, prompts, playbooks) — models read page 1
   and skip the rest (root rubric).
 - **`check_fn` answers reachability/opt-in, never surface.** It is TTL-cached process-wide, and one

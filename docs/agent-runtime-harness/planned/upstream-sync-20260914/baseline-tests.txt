@@ -1,0 +1,97 @@
+▶ venv: /c/Users/beast/.venvs/hermes-test
+▶ running per-file parallel test suite via run_tests_parallel.py
+  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)
+▶ real store root handed to the gateway fence: X:\Eternia\.hermes
+▶ pre-compiling bytecode cache
+▶ launching test runner
+Discovered 14 test files (~304 tests) under ['tests\\agent_runtime\\test_local_llama_config.py', 'tests\\agent_runtime\\test_local_llama_catalog.py', 'tests\\agent_runtime\\test_local_llama_manager.py', 'tests\\agent_runtime\\test_local_llama_process.py', 'tests\\agent_runtime\\test_local_llama_provider.py', 'tests\\agent_runtime\\test_local_llama_router.py', 'tests\\agent_runtime\\test_local_llama_rpc.py', 'tests\\agent_runtime\\test_local_llama_gateway.py', 'tests\\agent_runtime\\test_serve_rpc_authorization.py', 'tests\\agent_runtime\\test_profile_runner.py', 'tests\\agent_runtime\\test_config.py', 'tests\\hermes_cli\\test_persona_set_model.py', 'tests\\hermes_cli\\test_provider_visibility_v2.py', 'tests\\hermes_cli\\test_auth_codex_provider.py', 'tests\\hermes_cli\\test_runtime_provider_resolution.py', 'tests\\hermes_cli\\test_config.py', 'tests\\agent\\test_compression_feasibility.py']; running with -j 2
+[  1.6% |     5/~304 | ✓5 | ✗0] ✓ tests\agent_runtime\test_local_llama_catalog.py (5✓, 37.6s)
+[ 11.2% |    34/~304 | ✓34 | ✗ 0] ✓ tests\agent_runtime\test_config.py (29✓, 37.8s)
+[ 13.5% |    41/~304 | ✓49 | ✗ 0] ✓ tests\agent_runtime\test_local_llama_config.py (15✓, 9.9s)
+[ 14.1% |    43/~304 | ✓51 | ✗ 0] ✓ tests\agent_runtime\test_local_llama_gateway.py (2✓, 12.8s)
+[ 14.8% |    45/~304 | ✓53 | ✗ 0] ✓ tests\agent_runtime\test_local_llama_process.py (2✓, 7.7s)
+[ 16.1% |    49/~304 | ✓57 | ✗ 0] ✓ tests\agent_runtime\test_local_llama_provider.py (4✓, 6.3s)
+[ 20.4% |    62/~304 | ✓70 | ✗ 0] ✓ tests\agent_runtime\test_local_llama_manager.py (13✓, 19.3s)
+[ 20.7% |    63/~304 | ✓71 | ✗ 0] ✓ tests\agent_runtime\test_local_llama_router.py (1✓, 7.5s)
+[ 22.7% |    69/~304 | ✓77 | ✗ 0] ✓ tests\agent_runtime\test_local_llama_rpc.py (6✓, 7.5s)
+[ 28.0% |    85/~304 | ✓98 | ✗ 0] ✓ tests\agent_runtime\test_serve_rpc_authorization.py (21✓, 7.8s)
+[ 58.2% |   177/~304 | ✓190 | ✗  0] ✓ tests\agent_runtime\test_profile_runner.py (92✓, 12.5s)
+[ 61.8% |   188/~304 | ✓201 | ✗  0] ✓ tests\hermes_cli\test_auth_codex_provider.py (11✓, 10.5s)
+[ 82.9% |   252/~304 | ✓275 | ✗  0] ✓ tests\hermes_cli\test_config.py (74✓, 11.8s)
+[100.0% |   304/~304 | ✓327 | ✗  0] ✓ tests\hermes_cli\test_runtime_provider_resolution.py (52✓, 11.0s)
+
+=== Summary: 14 files, 327 tests passed, 0 failed (100% complete) in 103.6s (2 workers) ===
+
+=== ⚠ 1 FLAKY file (failed once, passed on retry — fix these) ===
+  tests\agent_runtime\test_local_llama_manager.py
+⚠ FLAKY: failed on attempt 1, passed on retry (attempt 2). Fix the flake — do not ignore this.
+--- first-attempt output ---
+============================= test session starts =============================
+platform win32 -- Python 3.12.5, pytest-9.0.3, pluggy-1.6.0
+rootdir: X:\wt\hermes-upstream-audit-20260914
+configfile: pyproject.toml
+plugins: anyio-4.14.2, asyncio-1.3.0, timeout-2.4.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 30.0s
+timeout method: thread
+timeout func_only: False
+collected 13 items
+
+tests\agent_runtime\test_local_llama_manager.py ...F.........            [100%]
+
+================================== FAILURES ===================================
+_______________ test_busy_and_stale_guards_are_server_enforced ________________
+
+manager = <agent_runtime.local_llama.manager.LocalLlamaManager object at 0x0000017313C89760>
+
+    def test_busy_and_stale_guards_are_server_enforced(manager):
+        request = params(manager)
+        manager.router.block.clear()
+        manager.submit("start", request)
+        with pytest.raises(LocalLlamaError) as caught:
+            manager.submit("stop", params(manager))
+>       assert caught.value.reason == "operation_busy"
+E       AssertionError: assert 'stale_revision' == 'operation_busy'
+E         
+E         - operation_busy
+E         + stale_revision
+
+tests\agent_runtime\test_local_llama_manager.py:101: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/agent_runtime/test_local_llama_manager.py::test_busy_and_stale_guards_are_server_enforced
+======================== 1 failed, 12 passed in 2.86s =========================
+
+
+--- retry output ---
+============================= test session starts =============================
+platform win32 -- Python 3.12.5, pytest-9.0.3, pluggy-1.6.0
+rootdir: X:\wt\hermes-upstream-audit-20260914
+configfile: pyproject.toml
+plugins: anyio-4.14.2, asyncio-1.3.0, timeout-2.4.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 30.0s
+timeout method: thread
+timeout func_only: False
+collected 13 items
+
+tests\agent_runtime\test_local_llama_manager.py .............            [100%]
+
+============================= 13 passed in 2.74s ==============================
+  Durations cached to test_durations.json (14 files)
+
+=== Per-file subprocess time distribution ===
+  Files:   14
+  Total subprocess CPU-wall: 199.9s  (runner wall: 103.6s, parallelism: 2x)
+  P50: 11.01s  P90: 37.59s  P95: 37.84s  P99: 37.84s  Max: 37.84s
+  <1s: 0 files (0%)  <2s: 0 files (0%)
+  Top 10 slowest:
+     37.84s  tests\agent_runtime\test_config.py
+     37.59s  tests\agent_runtime\test_local_llama_catalog.py
+     19.26s  tests\agent_runtime\test_local_llama_manager.py
+     12.78s  tests\agent_runtime\test_local_llama_gateway.py
+     12.51s  tests\agent_runtime\test_profile_runner.py
+     11.80s  tests\hermes_cli\test_config.py
+     11.01s  tests\hermes_cli\test_runtime_provider_resolution.py
+     10.47s  tests\hermes_cli\test_auth_codex_provider.py
+      9.91s  tests\agent_runtime\test_local_llama_config.py
+      7.80s  tests\agent_runtime\test_serve_rpc_authorization.py

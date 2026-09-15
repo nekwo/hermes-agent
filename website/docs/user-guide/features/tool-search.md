@@ -103,6 +103,7 @@ tools:
     max_search_limit: 25
     listing: auto       # embed a grouped name+description catalog manifest
     listing_max_tokens: 4000
+    never_defer: []     # extra tool names that always ride eagerly
 ```
 
 | Key | Default | Meaning |
@@ -116,6 +117,8 @@ tools:
 
 Per-call array caps are internal safety bounds, not configuration. Over-cap
 calls return an error so the model can retry with a smaller batch.
+
+| `never_defer` | `[]` | Extra tool names that always ride eagerly instead of deferring behind the bridge. Extends the built-in set (`agent_chat_send`, `agent_chat_dispatches`); cannot remove built-ins. Un-hides only — a tool must still be granted by the session's toolsets. |
 
 ### Why the listing exists
 

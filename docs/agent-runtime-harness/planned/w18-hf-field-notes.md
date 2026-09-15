@@ -1,0 +1,175 @@
+# w18/hf field notes — 2026-09-06
+
+Lane hf of wave 18: four reds, three Linux-only from CI run 34051553815, one
+Windows-only. One commit per row. Notes are written as each row lands.
+
+## Row 4 — `test_two_profiles_get_different_homes` (Windows-only red)
+
+The row asked whether "the two profiles collapse to one home through a
+case-folded or short-path comparison". They do not. The product is correct and
+the red is in the assertion:
+
+```
+assert home_a.endswith("alpha/home")
+E   AssertionError: assert False
+E    +  ...'...\\.hermes\\profiles\\alpha\\home'.endswith('alpha/home')
+```
+
+`get_subprocess_home()` returned two distinct, correct paths — the
+`home_a != home_b` line above it passed. What failed is a hardcoded POSIX
+separator inside a suffix match. On Linux `os.sep` is `/` and the suffix holds
+by accident of the platform; on Windows it can never hold.
+
+The test's real rule is per-profile **identity**, not a string suffix: each
+profile's subprocess HOME is that profile's own `{HERMES_HOME}/home`. Rewritten
+to assert the exact path (`home_a == str(base / "alpha" / "home")`), which is
+separator-correct on both hosts and strictly stronger than the suffix it
+replaces. Every other assertion in this file already used that spelling
+(`== str(profile_home)`); this case was the outlier.
+
+Killing mutation: made the container branch of `get_subprocess_home()` return
+`<profiles>/home` instead of `<profiles>/<name>/home` — i.e. actually collapse
+the two profiles onto one home, the failure the row hypothesised — and the
+rewritten test reds (exit 1). Product restored.
+
+## Row 1 — `ServeSocket` could not wake a blocked `accept()` off Windows
+
+`_close_listener` called `listener.close()` and nothing else. On Windows
+`closesocket` aborts a pending `accept()` in another thread; on Linux and macOS
+it does not. `close()`'s `thread.join(2.0)` then moved on regardless, so
+`accept_loop_exited` — the field whose entire purpose is "the loop never stops
+quietly" — was stamped only where the platform happened to be kind. CI saw the
+symptom as a FLAKY (failed attempt 1, passed on retry).
+
+**Which wakeup.** Of the row's three candidates:
+
+- `shutdown(SHUT_RDWR)` before `close()` wakes `accept()` on Linux, returns
+  `ENOTCONN` on macOS/BSD and does nothing there. It would swap a
+  Windows-shaped assumption for a Linux-shaped one, and a test for it can only
+  assert that `shutdown` was *called*, never that the loop ended.
+- A self-connect to the bound port ends the loop by opening a real connection
+  the service then has to refuse or admit — a wakeup with a visible side effect
+  on the very counters this test reads (`accepted`, `pending_peak`).
+- A **socketpair the loop selects on** was taken. It is the only one where the
+  loop's own shape states the rule (it waits on a peer *or* on the stop signal),
+  it assumes nothing about any platform's `close()`, and — the deciding
+  point — it makes the test say exactly what the row is about: with the
+  listener's `close()` neutered, the loop still ends, and it ends because
+  something woke it.
+
+**Shape.** `bind()` creates the pair and sets the listener non-blocking; the
+loop selects on `[listener, wake_read]` and only then accepts, treating
+`BlockingIOError` (select promised a peer, the kernel had none) as a plain
+retry rather than an accept error. `_close_listener` wakes FIRST, then closes:
+one byte for a loop already in `select`, then the write end closed so the read
+end sits at permanent EOF for a loop that has not reached `select` yet. The
+read end is closed by the accept thread itself, the only thread that ever
+selects on it — closing it from `close()` would free a descriptor under a live
+`select`. `begin_drain()` also reaches `_close_listener` without setting
+`_stop`, and that path is covered by the same wake plus the loop's existing
+`self._listener is None` check.
+
+Nothing downstream inherits the non-blocking listener: `_serve_connection`
+already calls `sock.settimeout(self._hello_deadline)` on the accepted socket as
+its first act.
+
+Red-first: `_CloseDoesNotWakeAccept` wraps the real bound listener, delegating
+`fileno()` and `accept()` and making `close()` a no-op that counts calls — POSIX
+semantics on any host. Without the wakeup the new test reds on Windows with
+`assert None == 'listener_closed'`, the exact CI signature. Killing mutation:
+deleting the single `self._signal_wakeup()` line from `_close_listener` reds it
+again (exit 1). `bare_server` gained a `start_accepting=False` knob so the
+substitution can happen between `bind()` and the thread.
+
+## Row 3 — `_root_pattern` dropped a POSIX root's leading slash
+
+`test_unmapped_absolute_paths_reports_residue_honestly` was still red on Linux
+after `854f0f2482`, and the pinned `current_platform_key` turns out to be
+irrelevant to it: nothing on the residue path reads the platform key. The
+difference is `tmp_path` — drive-rooted on Windows, `/tmp/...` on Linux.
+
+`_root_pattern` builds its regex from `re.split(r"[\\/]+", str(root))` with the
+empties dropped. A drive-letter root keeps its anchor (`X:`) through that split;
+a POSIX root's anchor IS the leading `/`, and it was thrown away with the empty
+first element. The pattern could then only match from the `t` of `/tmp`. Two
+callers read it and both were wrong on a Mac:
+
+- `unmapped_absolute_paths` uses `pattern.match(raw)`, anchored at position 0.
+  `raw` starts with `/`, the pattern starts with `tmp`, so **a root the operator
+  had just bound was reported as unmapped residue** — which is exactly the
+  assertion CI failed.
+- `tokenize_text` uses `pattern.subn`, which searches, so it matched — and
+  replaced everything except the slash. Measured before the fix:
+  `repo_scope: /Users/tony/My Projects/EterniaLauncher` rewrote to
+  `repo_scope: /${roots.eternia_launcher}`, a token that re-expands to a doubled
+  root (`//Users/...`) and fails `verify_roundtrip`. After:
+  `repo_scope: ${roots.eternia_launcher}`.
+
+Product fixed: a root whose string starts at a separator keeps it, as a leading
+`[\\/]+` on the pattern body (which also covers a UNC root). Drive-letter roots
+are untouched. `Path("/Users/...")` on Windows normalizes to `\Users\...`, so
+the leading-separator test reads the same on both hosts.
+
+The red-first test is host-independent on purpose — a literal POSIX root, and
+neither function stats it — so the Linux-only failure is now reproducible on
+Windows. It asserts both readers, because they failed in different directions.
+Reverting the product line reds it on Windows: `assert ['/Users/tony/My
+Projects/EterniaLauncher', '/opt/tools/thing'] == ['/opt/tools/thing']`.
+The pre-existing sibling needed no edit; it goes green on Linux from the product
+fix alone.
+
+## Row 2 — the ledger did not rot; the walk stopped following the emit
+
+**The row's platform premise does not hold.** `test_ledger_does_not_rot` is red
+on WINDOWS too, on unmodified `600ec5100f` — same assertion, same handler. So
+there is no path-case, `os.sep` or exec-assembled-part difference to find: the
+walk reads the same bytes on both hosts and gets the same answer. Whatever
+observation put "green on Windows" on the row was taken before
+`13c1d67178` (2026-09-05) landed.
+
+**What actually moved.** `13c1d67178` — the R-C5 open-chat lowering, "the verb
+gets a method, over the CLI handler's own row" — gave
+`_cmd_persona_instance_open_chat` a `_emit_persona_open_chat_payload` seam so a
+serve's in-process caller can take the row without `contextlib.redirect_stdout`
+rebinding the process's stdout under every other thread. Its `emit_json` call
+went with it. `_handlers()` only counted DIRECT calls, so it read a transport
+refactor as "this verb stopped emitting JSON" and asked for the exemption to be
+deleted from a verb that emits exactly as much as it ever did.
+
+So: follow the emit, not delete the entry. The walk now propagates
+`emits` / `attaches` / `chat_scope` from a handler's local `_emit_*` callees, to
+a fixpoint rather than one hop (a seam may delegate to another, and a cycle must
+not hang the scan).
+
+**Why `_emit_*` and not the whole call graph.** Measured both:
+
+| propagation | `_cmd_*` handlers newly seen to emit |
+|---|---|
+| direct calls only (before) | — |
+| via local `_emit_*` callees | 3 |
+| via every local callee | 30 |
+
+The three are `_cmd_persona_instance_open_chat`,
+`_cmd_persona_instance_open_new_chat` (both already carry ledger entries) and
+`_cmd_usage`. The full walk adds twenty more that were neither classified nor
+attaching; `_cmd_usage` is fixed below, leaving NINETEEN — seventeen
+`_cmd_characters_*`, `_cmd_mission_chat_message` and
+`_cmd_persona_instance_archive`. That is a real hole in this gate, and nineteen
+conscious classifications or routings is a workstream, not a line of this row. It is handed back as its own
+row rather than absorbed into `_BACKLOG_REASON`, which says in as many words not
+to grow that list.
+
+**`_cmd_usage`.** Surfacing it turned the first red into a second, and it is not
+a false positive: the verb emits a per-provider account-usage envelope through
+`_emit_usage_json` and states no root. An account whose credentials live under a
+different `HERMES_HOME` answers zero lanes in a perfectly well-formed envelope —
+the 2026-08-12 shape exactly. Routed through `attach_root_observability` on both
+JSON exits (the `--json` branch and the human-render fallback); the human
+renderer is untouched because the keys it prints are its own, and
+`attach_root_observability` never raises, so the verb's total-isolation contract
+is unchanged.
+
+Two reds, two fixes, each killed by reverting the other half: without the
+`_emit_*` follow, `test_ledger_does_not_rot` reds on
+`_cmd_persona_instance_open_chat`; without the `_cmd_usage` stamp,
+`test_every_json_verb_states_its_root_or_is_classified` reds naming it.

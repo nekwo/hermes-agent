@@ -269,6 +269,7 @@ The messaging gateway supports the following built-in commands inside Telegram, 
 | `/bg <prompt>` | Run a prompt in a separate background session. Results are delivered back to the same chat when the task finishes. See [Messaging Background Sessions](/user-guide/messaging/#background-sessions). |
 | `/btw <question>` | Ask a side question about the current conversation without interrupting it. Answered from a transcript snapshot; the answer is sent to the chat when ready. |
 | `/queue <prompt>` (alias: `/q`) | Queue a prompt for the next turn without interrupting the current one. |
+| `/queue-status` (alias: `/qstatus`) | Show active-run and queue visibility in the messaging gateway. |
 | `/steer <prompt>` | Inject a message after the next tool call without interrupting — the model picks it up on its next iteration rather than as a new turn. |
 | `/goal <text>` | Set a standing goal Hermes works toward across turns — our take on the Ralph loop. A judge model checks after each turn; if not done, Hermes auto-continues until it is, you pause/clear it, or the turn budget (default 20) is hit. Subcommands: `/goal status`, `/goal pause`, `/goal resume`, `/goal clear`. Safe to run mid-agent for status/pause/clear; setting a new goal requires `/stop` first. See [Persistent Goals](/user-guide/features/goals). |
 | `/subgoal <text>` | Append criteria to the active `/goal` mid-loop (`/subgoal`, `/subgoal remove <N>`, `/subgoal clear`). |

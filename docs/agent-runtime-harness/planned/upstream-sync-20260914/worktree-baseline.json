@@ -1,0 +1,140 @@
+[
+  {
+    "repo": "X:/Eternia/hermes-agent",
+    "path": "X:/Eternia/hermes-agent",
+    "head": "34ad8ba33f2508ab10bb24a26f0377ddb62660cb",
+    "status": []
+  },
+  {
+    "repo": "X:/Eternia/hermes-agent",
+    "path": "X:/wt/local-llama-hermes",
+    "head": "31bf01536a20609e5db0eb508ffcf55c4e7b10df",
+    "status": [
+      "?? qa_artifacts/local-llama-agent-aux-proof/",
+      "?? qa_artifacts/local-llama-agent-proof-retry/",
+      "?? qa_artifacts/local-llama-agent-proof/",
+      "?? qa_artifacts/local-llama-h0-one-slot/",
+      "?? qa_artifacts/local-llama-h0-verified/",
+      "?? qa_artifacts/local-llama-h0/",
+      "?? qa_artifacts/local-llama-runtime-proof/"
+    ]
+  },
+  {
+    "repo": "X:/Unreal Engine/Engine/Launcher/EterniaLauncher",
+    "path": "X:/Unreal Engine/Engine/Launcher/EterniaLauncher",
+    "head": "dd20ddb621cb5c874cc8749398affb7912a2f4ec",
+    "status": [
+      " M .claude/agent-memory/systems-engineer/INDEX-testing.md",
+      " M .claude/agent-memory/systems-engineer/MEMORY.md",
+      " M .claude/agent-memory/systems-engineer/feedback-crlf-python-write-text.md",
+      " M .claude/agent-memory/systems-engineer/feedback-dart-format-sweeps-98-files.md",
+      " M .claude/agent-memory/systems-engineer/feedback-powershell-herestring-in-bash-tool.md",
+      " M .claude/agent-memory/systems-engineer/project-presence-auth-churn-narrowing.md",
+      " M .claude/agent-memory/systems-engineer/reference-backend-test-environment.md",
+      "?? .claude/agent-memory/systems-engineer/INDEX-messaging.md",
+      "?? .claude/agent-memory/systems-engineer/INDEX-mission-control.md",
+      "?? .claude/agent-memory/systems-engineer/INDEX-spatial.md",
+      "?? .claude/agent-memory/systems-engineer/INDEX-tooling.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-affordance-absence-arm.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-bare-pump-fires-no-tick.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-captured-scheduler-across-remount.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-continuity-is-not-periodicity.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-fast-fixture-hides-async-teardown.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-git-checkout-path-discards-uncommitted.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-git-log-text-true-mojibake.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-googlefonts-runasync-undrainable.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-heredoc-backticks-run-commands.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-hermes-cli-exit-2-ambiguity.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-mutation-needs-green-baseline.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-mutation-revert-discards-uncommitted-fix.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-office-canvas-observable-without-io.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-pixel-sampler-wraps-out-of-frame.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-postframe-leaks-across-tests-in-one-file.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-rebase-then-push-in-one-command.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-scratchpad-shared-across-lanes.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-soloud-stop-then-play-silences-both.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-tester-drag-subtracts-touch-slop.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-tier-waiver-forbids-the-raise.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-veil-pin-lives-at-paint.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-widget-pin-unkillable-three-mechanisms.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-widget-test-rebuilds-between-pointer-events.md",
+      "?? .claude/agent-memory/systems-engineer/feedback-widget-test-wall-clock-debounce.md",
+      "?? .claude/agent-memory/systems-engineer/integration-test-blocked-by-single-instance.md",
+      "?? .claude/agent-memory/systems-engineer/project-landimpl-landing-cue.md",
+      "?? .claude/agent-memory/systems-engineer/project-live-landscape-resolver-authority.md",
+      "?? .claude/agent-memory/systems-engineer/project-map-document-bytes-r15-lane-m.md",
+      "?? .claude/agent-memory/systems-engineer/project-map-format-v6-r16.md",
+      "?? .claude/agent-memory/systems-engineer/project-mcflight-console-send-flight.md",
+      "?? .claude/agent-memory/systems-engineer/project-message-motion-firstdiag.md",
+      "?? .claude/agent-memory/systems-engineer/project-message-motion-firstimpl.md",
+      "?? .claude/agent-memory/systems-engineer/project-message-motion-landdiag.md",
+      "?? .claude/agent-memory/systems-engineer/project-message-motion-live1.md",
+      "?? .claude/agent-memory/systems-engineer/project-message-motion-live2.md",
+      "?? .claude/agent-memory/systems-engineer/project-message-motion-live5.md",
+      "?? .claude/agent-memory/systems-engineer/project-message-motion-live6.md",
+      "?? .claude/agent-memory/systems-engineer/project-message-motion-mcimpl.md",
+      "?? .claude/agent-memory/systems-engineer/project-message-motion-rapid.md",
+      "?? .claude/agent-memory/systems-engineer/project-message-motion-smoothdiag.md",
+      "?? .claude/agent-memory/systems-engineer/project-message-motion-snap.md",
+      "?? .claude/agent-memory/systems-engineer/project-message-motion-w05b.md",
+      "?? .claude/agent-memory/systems-engineer/project-message-motion-w5.md",
+      "?? .claude/agent-memory/systems-engineer/project-message-motion-xfade.md",
+      "?? .claude/agent-memory/systems-engineer/project-r16-old-format-at-the-picker.md",
+      "?? .claude/agent-memory/systems-engineer/project-r17-collision-owner-and-derived-walls.md",
+      "?? .claude/agent-memory/systems-engineer/project-r27-floor-modules.md",
+      "?? .claude/agent-memory/systems-engineer/project-r27-placeable-kind-contract.md",
+      "?? .claude/agent-memory/systems-engineer/project-r27-wall-modules.md",
+      "?? .claude/agent-memory/systems-engineer/project-realm-level-family.md",
+      "?? .claude/agent-memory/systems-engineer/project-sounddiag-send-cues-under-floor.md",
+      "?? .claude/agent-memory/systems-engineer/project-threads-card-identity.md",
+      "?? .claude/agent-memory/systems-engineer/project-voice-world-door.md",
+      "?? .claude/agent-memory/systems-engineer/reference-real-device-audio-via-integration-test.md"
+    ]
+  },
+  {
+    "repo": "X:/Unreal Engine/Engine/Launcher/EterniaLauncher",
+    "path": "X:/wt/chara-s1",
+    "head": "86fdd9aae9ca6c96e8179a14767f8f0dea34bfa0",
+    "status": []
+  },
+  {
+    "repo": "X:/Unreal Engine/Engine/Launcher/EterniaLauncher",
+    "path": "X:/wt/kind3",
+    "head": "4bcb51341eccb913e2d9fbfa60307c0d5dcf2858",
+    "status": []
+  },
+  {
+    "repo": "X:/Unreal Engine/Engine/Launcher/EterniaLauncher",
+    "path": "X:/wt/local-llama-launcher",
+    "head": "36b5c6813af13f0500efbe24f004ab749293f916",
+    "status": []
+  },
+  {
+    "repo": "X:/Unreal Engine/Engine/Launcher/EterniaLauncher",
+    "path": "X:/wt/maps-bytes2",
+    "head": "13dc30ecf0449c07b19cc8a6af8d052a2db729b0",
+    "status": []
+  },
+  {
+    "repo": "X:/Unreal Engine/Engine/Launcher/EterniaLauncher",
+    "path": "X:/wt/maps-voice",
+    "head": "4b0900b89f90a38a4cbf10eabd53b50426175daa",
+    "status": [
+      " M lib/features/spatial_voice/maps/voice_channel_map_apply.dart",
+      " M lib/features/spatial_voice/shell/spatial_stage_chrome.dart",
+      " M test/architecture/no_unreachable_lib_files_test.dart",
+      " M test/features/spatial_voice/maps/voice_channel_map_apply_test.dart",
+      " M test/features/spatial_voice/maps/voice_channel_map_apply_wire_test.dart",
+      " M test/features/spatial_voice/maps/voice_channel_map_live_reread_test.dart",
+      " M tool/deadcode/baseline.json",
+      "?? lib/features/spatial_voice/maps/voice_channel_map_chip.dart",
+      "?? test/features/spatial_voice/maps/voice_channel_map_chip_gate_test.dart"
+    ]
+  },
+  {
+    "repo": "X:/Unreal Engine/Engine/Launcher/EterniaLauncher",
+    "path": "X:/wt/motion-w42",
+    "head": "4c411d0171f139e2a19e7a8af8e60b06388d7485",
+    "status": []
+  }
+]

@@ -1,0 +1,582 @@
+[
+  {
+    "path": ".gitattributes",
+    "sha256": "2402fdea7a9026d55d882a013835579eebba3f870f2465858870eb532e3b6f56",
+    "syntax": "not applicable"
+  },
+  {
+    "path": ".gitignore",
+    "sha256": "0d05ed6e64c777a3c439bd81463915aabbcb75df8de89b700121a0a6eaf4895c",
+    "syntax": "not applicable"
+  },
+  {
+    "path": "AGENTS.md",
+    "sha256": "ad6b06c3061661ad7a56b6710809fb2d2659863979c0754d3aa9f7af1ce78822",
+    "syntax": "not applicable"
+  },
+  {
+    "path": "agent/agent_init.py",
+    "sha256": "b7f0ddcbffc5fc9390e0e5187045a44356fbd6aa781e2a5f68979c66cf5c0366",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/anthropic_adapter.py",
+    "sha256": "7a8777250e07e6c8534e589adcf64bc4aa3f9c281eba521ec3be992bf18fe722",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/auxiliary_client.py",
+    "sha256": "dfef49e4f65e565c55acec72663e0f0865252c2bf99bb3f8b18a2919c95bdc90",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/chat_completion_helpers.py",
+    "sha256": "4f6744f7dea2c814334f066164cfba6a993f385fe84c7ebd40db30ef7ea0b4db",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/codex_runtime.py",
+    "sha256": "647fc6adf3639ce3552dc981547206db398704fc04d38121074b951293a70194",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/conversation_loop.py",
+    "sha256": "518229aa2aabcc273ebc1259210559317fab7cc84564a3b0321475edade36738",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/credential_pool.py",
+    "sha256": "6db2b8351e58afb43d3d96ef82e1fa370b83cec376dc0bcb994cad555a640001",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/image_routing.py",
+    "sha256": "ab89d74b774ba2b6f6af61421bab19ffb1dd4c7862091f860d296f50997ce314",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/process_bootstrap.py",
+    "sha256": "1f9b65d868210858259acc1bcc5e08c68e88f4ac90c98629f59f7b67d6d308c1",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/session_persistence.py",
+    "sha256": "7d76cb802c4e6d67a5639141b82ba46b99592292406301067d43fa0fa8c5ad3e",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/ssl_guard.py",
+    "sha256": "c7da2d69e81b3616bfeba82bcfdf9bf55dbb588ea3004045af4ea19011a67861",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/turn_api_call.py",
+    "sha256": "b96fceb6678d63c2929eb0e468974970d1087f53dd76df19b31d62c4c1c80e2d",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/turn_api_request.py",
+    "sha256": "f01544378abd922363d1c33ef44b951b7c6c1ba6b7e0d891f60110711d9e45b5",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/turn_context.py",
+    "sha256": "3d55dfb9abf6ca051a462b5c7830598bbc0a9082fc7852d11224001cd1c81132",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/turn_facade.py",
+    "sha256": "693f458428aac0bfe14982ff0717433e0ef1e9bf06f6eaa31118558a6c91d199",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/turn_finalizer.py",
+    "sha256": "3bac779f27c29fc51add2ac38c1c6096ba03835b6701bf18341907b6889e180a",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/turn_response_check.py",
+    "sha256": "971ae28a7fc92fcd160a694e8b9813b6f34dbd1f5d92b85c6677eaeead7a3790",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/turn_response_intake.py",
+    "sha256": "89565c2af102c7a1a9347727c8d640ddc9dd4a4b985bb98223e848a41a6b8eb6",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/turn_usage.py",
+    "sha256": "0ea252766aa5552804e02c4088a1b6964f8d78a1c67bf121e38100de99f34d50",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent_runtime/auth_extensions.py",
+    "sha256": "215cba8fcec78f9beb0865bbaa379817e1269d257ce569c7d62947fc047d4971",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent_runtime/auxiliary_probe.py",
+    "sha256": "16040a769e57a7e774090a3a9bedba3af731997ef02fb2208429197bc0b60a9c",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent_runtime/codex_observability.py",
+    "sha256": "d0777ea867cdb676351d2a207530ee19c522f17c91c562ef33ea77b068466bd5",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent_runtime/conversation_observability.py",
+    "sha256": "2b9253d2de10f0a1b966a66f4957811b65085c90b577099e770a2b400221bd40",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent_runtime/doctor_extensions.py",
+    "sha256": "66fd8749d60c52f40911c779da941ccd53769dbc9d9440b4f4adb9fac762002c",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent_runtime/init_observability.py",
+    "sha256": "77ec452fcd92aeedfc5ba9153f0e11be0b8950fd90444c736be5208c441f9de1",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent_runtime/native_persistence.py",
+    "sha256": "04f92abb92d281b754e0979e1ac8af466504026485de6ab85ff78ccc7ded6154",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent_runtime/pool_rotation.py",
+    "sha256": "136ef46826fc20bf197eacb313c8f1f3ac8e57ef76edb9ae43130d62fcdb2869",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent_runtime/session_extensions.py",
+    "sha256": "c486580fa28c98dc5c66b7a69dab0f15dac65a965929763141c2d783d17299e6",
+    "syntax": "passed"
+  },
+  {
+    "path": "cli-config.yaml.example",
+    "sha256": "300ec8434fb4c90c8944628cf6e1395d12e1326a4301ade4e9ac292984ca934c",
+    "syntax": "not applicable"
+  },
+  {
+    "path": "docs/downstream-development.md",
+    "sha256": "8127f4e48b80a05f1e5015d9cc8e10856c7f3b10aaefb13d4c612e9d0f237095",
+    "syntax": "not applicable"
+  },
+  {
+    "path": "gateway/lifecycle_ledger.py",
+    "sha256": "80aae6f3163c6268b066dc4cb18abe97ad92adc7cfcb7e78c0f883595274e4da",
+    "syntax": "passed"
+  },
+  {
+    "path": "gateway/shutdown_watchdog.py",
+    "sha256": "3372fa5625b465888158b9915a8c0845e450cdc4239df70ab726035ec0b90ec7",
+    "syntax": "passed"
+  },
+  {
+    "path": "gateway/status.py",
+    "sha256": "538f6675696c1500cb8c787f29002060ba02d1b455328ded421d2119367a98f5",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/_bytecode_sweep.py",
+    "sha256": "c1b787b87a69ff2b699022ec814e6f217b88f498111d98e7881094a98aa01632",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/_desktop_processes.py",
+    "sha256": "48f12fc7d863bf14594c473bdb55f7d82cae7f0fefbb0bcae0d140fc8dbe437e",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/_downstream_cli.py",
+    "sha256": "261a50aeca3daa2f0569bf2fe113aee3dc92b08b6999593c256a70f59b1a32af",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/_profile_bootstrap.py",
+    "sha256": "1dd4fa40cc898098fbbb811ed543d3acdf050d166b0a49bdb3c5f1371fff9008",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/auth.py",
+    "sha256": "296252018f4d7170173de2d870406b1acb40443ba90a1fce73f72eb85c7784ef",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/auth_codex.py",
+    "sha256": "491af7f265e7f04ecc92e6acc7b945aef2c8617fbccf7fec7c9891b8432565fa",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/auth_commands.py",
+    "sha256": "532d004b22c1a30d11a3bc32f042e15a897b8662891946dccbc4e59c10a2e13e",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/auth_nous.py",
+    "sha256": "1f2ac23cf6f2cf804aa90b4b9db0d951164a27ec885feb1fd4ac57f4ebdac860",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/bundles.py",
+    "sha256": "0596fe7543fbae2cc2f0c358e496dbb337e1c5251c1b2a970ed75827a5e77682",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/config.py",
+    "sha256": "2b127363d3dca4d84746f203a9b4fee8146bf4056043da03b240232980970d26",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/config_defaults.py",
+    "sha256": "26b6224551ed03d56211d3105a94acba108d7ec33c43f43ff3e0561fd360328b",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/curator.py",
+    "sha256": "bce797eff34715e46ff25330bb903ef34c1a44739f358104b7c19022c25b0db3",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/doctor.py",
+    "sha256": "a2d2ce039418ac04fbaa737058e5e22e8ea785d6535dd55d44fe7a9dc7451f5a",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/doctor_config.py",
+    "sha256": "c04b6dd31bb78355af0e037210c6c76d620d29c1746df82a6fed0c25a1ecae68",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/doctor_live.py",
+    "sha256": "028fca50ec7ed9ec2608771baa34b8210044fd27eb061784ee198e26c5b3556a",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/doctor_platform.py",
+    "sha256": "7d548e3ed4f4bcec07cd3bf4016780008aa6ec4e7f58fc880f10b6353b04d47d",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/doctor_state.py",
+    "sha256": "df110c406f05559081b6bba2ec43545521e47bfe8759ae9adb43f29c1eb7318f",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/doctor_tools.py",
+    "sha256": "8fa4bade8b2c38a3e57866ccb43e1bbfe01fab23aa0f08e20e42f5f993583cfb",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/main.py",
+    "sha256": "f3f893d3c07fb110fd6604360fa436e74d0b3a18e7c8e453e3eb51c630679db6",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/main_desktop.py",
+    "sha256": "3478efc24ecafd4c3ff6247e50841a07570e44431f14c856bf638a36d99dbc42",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/main_web_build.py",
+    "sha256": "66a0a26662c2e7f007c6c80c64e85b904b908c5ef0ceca4682fdbb8ebc339175",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/profile_cmd.py",
+    "sha256": "96198cf421ea64affffaabbf8627fc4c15958a136ebb3fca2f4e40dc3b1b517e",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/provider_catalog.py",
+    "sha256": "4d1994d8615d9e33e8e06aecadf562caab9a2eb3d1cbef64a87c9d66fccc447b",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/subcommands/computer_use.py",
+    "sha256": "1613f2e553c00c6c7c6a37fc541fef7e4b43cfcd88d9fba733a9cbfa3422eb54",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/subcommands/profile.py",
+    "sha256": "af709aeff1d6303da81b9520ba6f7343580bc2fcf851af1447552cf5ee8c7a51",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/web_routers/oauth.py",
+    "sha256": "f02c1dcb47488a578c1bdde9aeaf7f1f906c94e70e5928db72ed3121eaa0c162",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/web_routers/profiles.py",
+    "sha256": "a276910fe13299ac8262ed471a513902ebf50fe2681159af1b8b0f994f58a5c5",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/web_server.py",
+    "sha256": "625f99e78c196580c439ba4fc888e6d071edcc76ba72ef768eec3f9b26ee29b6",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/web_server_config.py",
+    "sha256": "bffe8da4a11ec2645da31d66c753ca0c61be03ed4e1abb001e2b45523676bc24",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/web_server_oauth.py",
+    "sha256": "c666e6cf83a1be0a20283f10bfc0252f38150f27b3c0672b3fcbc6e5131d0335",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_constants.py",
+    "sha256": "3d01310b6a0b58d2d4a5ffe31cac4daa8cb46f05bd98a283f3beaffdb4b238b1",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_state.py",
+    "sha256": "29d4028e0ea4c8afbd2b349df8e6deb5784b619c09fbdaaad0c0cba3bf7acb19",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_state_messages.py",
+    "sha256": "0c45bedb447e9fac0ddc8a7705486898bec832d819eeed951f30ddea0ae0acc3",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_state_sessions.py",
+    "sha256": "b61ac895a86ae5e3288938b813db8e035ba2a6bcc680f615b61181f35de8cbc5",
+    "syntax": "passed"
+  },
+  {
+    "path": "plugins/dashboard_auth/_shared.py",
+    "sha256": "7077cb9854c3099f43575d236dbf2b20a6fca720febf6239a934efd42c92f062",
+    "syntax": "passed"
+  },
+  {
+    "path": "plugins/platforms/feishu/adapter.py",
+    "sha256": "ba8864eca97bd79dad683c3074c9641cc73638cac18f8735505867d900e9b7d9",
+    "syntax": "passed"
+  },
+  {
+    "path": "run_agent.py",
+    "sha256": "fd7a3c07677638ea5dd89df1213190277786447f63014cb52229e84fd79b0fab",
+    "syntax": "passed"
+  },
+  {
+    "path": "scripts/install.ps1",
+    "sha256": "bf9731b1336980797c054718e15b5a6bd2a872c44ae690101981197bde79acf8",
+    "syntax": "not applicable"
+  },
+  {
+    "path": "tests/agent/test_anthropic_adapter.py",
+    "sha256": "9dfbb7dc4dc6ec381aea7c8026b5521656c505aea70f2333a6690c11b44a9da2",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/agent/test_anthropic_keychain.py",
+    "sha256": "5fd010106c564e731dd1531ce3ab5f674ba7435531eb829c13f8fbffb3e10c64",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/agent/test_credential_pool.py",
+    "sha256": "3decf4706d86808c0665692d470f4fae39cfe68397589fc15c9c10968f155e56",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/agent/test_nous_oauth_401_guidance.py",
+    "sha256": "235cbe3315adcb126d0624abfe8ed17981cad2f21bf3b33dfe66d2b3d039c602",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/agent/test_skill_commands.py",
+    "sha256": "a5d5301d92e96736e0c08e111b3e31dae3c507a99587940394b2c8eb97f4a246",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/agent/test_skill_utils.py",
+    "sha256": "23986256a71e33a3dfc91e33eeb2003433912f64916a4d5d0ace284c7f1d7624",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/gateway/conftest.py",
+    "sha256": "bab0a25b4cd85a935ccaca6951ac49d8d351d5f9bec7fb9ecb6ae008f862aff9",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/gateway/test_completion_delivery.py",
+    "sha256": "eca176d088a93d5e738e47c7aa6e3dd3368dc87e4a487c9191edc638ccdf6382",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/gateway/test_config_env_bridge_authority.py",
+    "sha256": "7d267069a4f0d37a0745bc8b76425da6bdd624b36706d2b246cb41ff86830ab1",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/gateway/test_platform_base.py",
+    "sha256": "2dfb7e9c9d9c60dfcc939202c518770db4420105138cf23948b8570d99736b5e",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/hermes_cli/test_config.py",
+    "sha256": "89054345dc3196d2e8182c0c5c43fd1025d5355fe4cd6b151df254c2d0383513",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/hermes_cli/test_config_read_guard.py",
+    "sha256": "abd0b187a4049424797ad3e49f6c418cb395631ce2137993042324676038ba11",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/hermes_cli/test_curator_recent_run_notice.py",
+    "sha256": "f98a2be1fe48f1dee01e85ba4fe1275927e276fa3ea1373a7252e71925230216",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/hermes_cli/test_gateway.py",
+    "sha256": "59d113fc241b9425d9f2e3a227c3660b597e95be14324d2ef7caec8454102433",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/hermes_cli/test_kanban_boards.py",
+    "sha256": "2998f1cd0291c8e0d9080e3178354b05975e3f5e06f79194b4dc033a3c586ed4",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/hermes_cli/test_mcp_startup.py",
+    "sha256": "c0efbcad85b8e3b6bea22e07d889a913099c14a39ba1606173c4343f253b82fe",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/hermes_cli/test_setup_blank_slate.py",
+    "sha256": "7cc9ef48a9f71ab21b19080b0fc35b519d4f68f664c4d9f3f8e197253083bb10",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/hermes_cli/test_update_stale_dashboard.py",
+    "sha256": "98eea0c1a7a8bd6d810bdedcc991ea8a10707606ac530158368cca4e2d2f8758",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/plugins/platforms/photon/test_sidecar_paths.py",
+    "sha256": "3f606b49bd6276dee14dc25424b920aa370493c3058d639a92faefdf2e6e4e04",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/tools/test_file_tools_cwd_resolution.py",
+    "sha256": "f217088b0cc67214c6d70f1670d935697aeaf38a4127b68d4f12e2f7a5ebcc45",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/tools/test_local_env_windows_msys.py",
+    "sha256": "b47c50f3a87b0fd61351d0b868478f3b0300ec2929ce17f5bc4df3c1e531bd8c",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/tools/test_modal_sandbox_fixes.py",
+    "sha256": "c4148347b93d614912eaa9577f1bc4c3bd543855da0aff0a3e95bb53f2bbf995",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/tools/test_process_registry.py",
+    "sha256": "8113add4de601a95a520835ee7d8fa4ea9fda87496dde06eed8f071e1bd0f23a",
+    "syntax": "passed"
+  },
+  {
+    "path": "tests/tools/test_session_search.py",
+    "sha256": "52cc3fb0099344ed7efaf2af9b243c01968dd099eb19b1ad5e519e4b7572d5b0",
+    "syntax": "passed"
+  },
+  {
+    "path": "tools/AGENTS.md",
+    "sha256": "2dec97615312c42d81b64308eb58ee4b6bde2cca4954232ffaecd52c989011dc",
+    "syntax": "not applicable"
+  },
+  {
+    "path": "tools/clarify_tool.py",
+    "sha256": "613109438d39f8043dbb370af862bee9e994e52b413d33421999c4756e1476b3",
+    "syntax": "passed"
+  },
+  {
+    "path": "tools/close_terminal_tool.py",
+    "sha256": "8940b3a9a47c2981ec009cc2594d3e545792ab9b2619e2839bc7871aa2b516ca",
+    "syntax": "passed"
+  },
+  {
+    "path": "tools/code_execution_tool.py",
+    "sha256": "5c6a64af552a68c7bc362e17996cdfd17d0565216a9628a68e22a69df85a63f3",
+    "syntax": "passed"
+  },
+  {
+    "path": "tools/environments/daytona.py",
+    "sha256": "b68f9fa4c3d21cfef62c2bcac329036a8f56c87d47ee7db66164441b2a5a54d4",
+    "syntax": "passed"
+  },
+  {
+    "path": "tools/environments/modal.py",
+    "sha256": "fd6ddaeefa6d42ef9c89f1931bfd27843e3440393909e252edfacadce3bae898",
+    "syntax": "passed"
+  },
+  {
+    "path": "tools/environments/singularity.py",
+    "sha256": "c2925f160dcaebf95047e2cc03f7554c5471cfcab026d5badb28af9505ce2335",
+    "syntax": "passed"
+  },
+  {
+    "path": "tools/file_operations.py",
+    "sha256": "5e5d5ec1e1a98fb776ff4c6b3aa35d48e3940c07097b4adab84b38ade686f004",
+    "syntax": "passed"
+  },
+  {
+    "path": "tools/image_generation_tool.py",
+    "sha256": "dc80560756023f56c72a7b45db31e1f58eaf4b08886b104544bcd20998ac58bf",
+    "syntax": "passed"
+  },
+  {
+    "path": "tools/read_terminal_tool.py",
+    "sha256": "9a1aeff570e8f40c787922da9381fbce088c31f5dfd4043528213c1eec196f17",
+    "syntax": "passed"
+  },
+  {
+    "path": "tools/todo_tool.py",
+    "sha256": "ce71e5b0df95c0a110a2c3dd34ba9e114c1f93e82d20540d688c90739a366969",
+    "syntax": "passed"
+  },
+  {
+    "path": "tools/tool_full_descriptions.py",
+    "sha256": "4d589a3331a6a53149ba4ecc58762b2b66051b80bb8dbfb42e037e043062cc02",
+    "syntax": "passed"
+  },
+  {
+    "path": "tui_gateway/entry.py",
+    "sha256": "cfdc68dc8f30bf3c1b70a5592b5bc4be277452429a611f82cbb5ae427182650f",
+    "syntax": "passed"
+  },
+  {
+    "path": "utils.py",
+    "sha256": "b541b1eb6d43b1f5290e9a1824765bf546f1ffbff384fe768e693851909c27d1",
+    "syntax": "passed"
+  },
+  {
+    "path": "website/docs/developer-guide/chronos-managed-cron-contract.md",
+    "sha256": "cbcc668056cea6debec401f794e1998016c90840d3385c48580d1533df3ccc83",
+    "syntax": "not applicable"
+  },
+  {
+    "path": "website/docs/user-guide/features/tool-search.md",
+    "sha256": "78427306439fb6e1eb207f9431cee415f1e8b2fddf244e118d5bffa894fba67d",
+    "syntax": "not applicable"
+  },
+  {
+    "path": "website/docs/user-guide/messaging/index.md",
+    "sha256": "67a3da83f8bbf81fb150fad10659135f122a165e1cac9dba6a33624685c2df6b",
+    "syntax": "not applicable"
+  },
+  {
+    "path": "website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/user-guide/messaging/index.md",
+    "sha256": "01003f11a9193ac88acd80c65dbe0e2cc2096b99b478000cd5306667e38453ce",
+    "syntax": "not applicable"
+  }
+]

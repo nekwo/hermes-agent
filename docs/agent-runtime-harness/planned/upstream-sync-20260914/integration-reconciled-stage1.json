@@ -1,0 +1,152 @@
+[
+  {
+    "path": "agent/auxiliary_client.py",
+    "sha256": "dfef49e4f65e565c55acec72663e0f0865252c2bf99bb3f8b18a2919c95bdc90",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/auth.py",
+    "sha256": "296252018f4d7170173de2d870406b1acb40443ba90a1fce73f72eb85c7784ef",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/auth_codex.py",
+    "sha256": "491af7f265e7f04ecc92e6acc7b945aef2c8617fbccf7fec7c9891b8432565fa",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/auth_nous.py",
+    "sha256": "1f2ac23cf6f2cf804aa90b4b9db0d951164a27ec885feb1fd4ac57f4ebdac860",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_state.py",
+    "sha256": "29d4028e0ea4c8afbd2b349df8e6deb5784b619c09fbdaaad0c0cba3bf7acb19",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_state_sessions.py",
+    "sha256": "b61ac895a86ae5e3288938b813db8e035ba2a6bcc680f615b61181f35de8cbc5",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_state_messages.py",
+    "sha256": "0c45bedb447e9fac0ddc8a7705486898bec832d819eeed951f30ddea0ae0acc3",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/conversation_loop.py",
+    "sha256": "518229aa2aabcc273ebc1259210559317fab7cc84564a3b0321475edade36738",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/turn_context.py",
+    "sha256": "3d55dfb9abf6ca051a462b5c7830598bbc0a9082fc7852d11224001cd1c81132",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/turn_api_call.py",
+    "sha256": "b96fceb6678d63c2929eb0e468974970d1087f53dd76df19b31d62c4c1c80e2d",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/turn_api_request.py",
+    "sha256": "f01544378abd922363d1c33ef44b951b7c6c1ba6b7e0d891f60110711d9e45b5",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/turn_response_check.py",
+    "sha256": "971ae28a7fc92fcd160a694e8b9813b6f34dbd1f5d92b85c6677eaeead7a3790",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/turn_response_intake.py",
+    "sha256": "89565c2af102c7a1a9347727c8d640ddc9dd4a4b985bb98223e848a41a6b8eb6",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent/turn_usage.py",
+    "sha256": "0ea252766aa5552804e02c4088a1b6964f8d78a1c67bf121e38100de99f34d50",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/doctor.py",
+    "sha256": "a2d2ce039418ac04fbaa737058e5e22e8ea785d6535dd55d44fe7a9dc7451f5a",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/doctor_config.py",
+    "sha256": "c04b6dd31bb78355af0e037210c6c76d620d29c1746df82a6fed0c25a1ecae68",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/doctor_live.py",
+    "sha256": "028fca50ec7ed9ec2608771baa34b8210044fd27eb061784ee198e26c5b3556a",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/doctor_platform.py",
+    "sha256": "7d548e3ed4f4bcec07cd3bf4016780008aa6ec4e7f58fc880f10b6353b04d47d",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/doctor_state.py",
+    "sha256": "df110c406f05559081b6bba2ec43545521e47bfe8759ae9adb43f29c1eb7318f",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/doctor_tools.py",
+    "sha256": "8fa4bade8b2c38a3e57866ccb43e1bbfe01fab23aa0f08e20e42f5f993583cfb",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/web_server.py",
+    "sha256": "625f99e78c196580c439ba4fc888e6d071edcc76ba72ef768eec3f9b26ee29b6",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/web_server_config.py",
+    "sha256": "bffe8da4a11ec2645da31d66c753ca0c61be03ed4e1abb001e2b45523676bc24",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/web_server_oauth.py",
+    "sha256": "c666e6cf83a1be0a20283f10bfc0252f38150f27b3c0672b3fcbc6e5131d0335",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/web_routers/oauth.py",
+    "sha256": "f02c1dcb47488a578c1bdde9aeaf7f1f906c94e70e5928db72ed3121eaa0c162",
+    "syntax": "passed"
+  },
+  {
+    "path": "hermes_cli/provider_catalog.py",
+    "sha256": "4d1994d8615d9e33e8e06aecadf562caab9a2eb3d1cbef64a87c9d66fccc447b",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent_runtime/auth_extensions.py",
+    "sha256": "215cba8fcec78f9beb0865bbaa379817e1269d257ce569c7d62947fc047d4971",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent_runtime/session_extensions.py",
+    "sha256": "c486580fa28c98dc5c66b7a69dab0f15dac65a965929763141c2d783d17299e6",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent_runtime/auxiliary_probe.py",
+    "sha256": "16040a769e57a7e774090a3a9bedba3af731997ef02fb2208429197bc0b60a9c",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent_runtime/conversation_observability.py",
+    "sha256": "2b9253d2de10f0a1b966a66f4957811b65085c90b577099e770a2b400221bd40",
+    "syntax": "passed"
+  },
+  {
+    "path": "agent_runtime/doctor_extensions.py",
+    "sha256": "66fd8749d60c52f40911c779da941ccd53769dbc9d9440b4f4adb9fac762002c",
+    "syntax": "passed"
+  }
+]

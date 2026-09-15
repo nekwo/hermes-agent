@@ -269,8 +269,8 @@ families: `hermes_state.py` (21), `gateway/run.py` (15), `tools/mcp_tool.py` (15
   display. Details: `hermes_cli/AGENTS.md`.
 - **Never hardcode `~/.hermes`.** `get_hermes_home()` for code paths, `display_hermes_home()`
   for user-facing text (both from `hermes_constants`). Hardcoding breaks profiles (5 bugs in
-  PR #3575). Module-level constants are fine — they cache after `_apply_profile_override()`
-  sets `HERMES_HOME`. Profile operations themselves are HOME-anchored
+  PR #3575). Resolve filesystem paths at call time; import-time home constants can escape
+  profile scopes and test isolation. Only display labels may be frozen. Profile operations themselves are HOME-anchored
   (`_get_profiles_root()` = `Path.home()/.hermes/profiles`) so `hermes -p x profile list`
   sees all profiles — intentional, not a bug.
 - **Argparse alias dispatch:** `add_parser("list", aliases=["ls"])` sets `dest` to the literal
@@ -430,3 +430,7 @@ Long-form background lives in `website/docs/developer-guide/` (agent-loop, promp
 context-compression-and-caching, gateway-internals, tools-runtime, plugins/, cron-internals,
 session-storage, ...). Workflow rules (PR/issue/review/salvage process) live in the
 `hermes-agent-dev` skill, not here.
+
+## Downstream development contract
+
+Before working in this fork, also read [docs/downstream-development.md](docs/downstream-development.md). Its call-time profile resolution and hermetic test-runner rules apply throughout this repository.

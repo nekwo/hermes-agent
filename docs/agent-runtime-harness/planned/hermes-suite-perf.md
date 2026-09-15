@@ -1,0 +1,396 @@
+# Planned — hermes test-suite performance (the 32:37 serial wall)
+
+**Status:** IMPLEMENTED 2026-09-01 (same day — operator go-ahead "implement
+this all", and the operator excluded `X:\Eternia` in Defender, which resolved
+R2 and reshaped Stage 7 into landed opt-in wiring). Stages 1, 2, 5, 6, 7
+landed with acceptance measurements and sabotage round-trips; Stage 3 parity +
+integrity verification and Stage 4's worker sweep measured the same session.
+Per-stage results: field notes §§8–14. R5's classification table: field notes
+§12 — strike pass RULED 2026-09-01 (delegated review): all 37 sites upheld,
+zero struck. R3 RULED 2026-09-01 (delegated review): parallel runner is the
+documented full-suite default on this machine. R1/R6 stand as recommended:
+no xdist, no per-batch isolation.
+**Evidence:** [`hermes-suite-perf-field-notes-2026-09-01.md`](hermes-suite-perf-field-notes-2026-09-01.md)
+(all § references below point there).
+
+## EXECUTED — 2026-09-01, the same day (ledger)
+
+| stage | what landed | sha(s) | measured outcome |
+|---|---|---|---|
+| 1 — psutil off the floor | lazy children-snapshot in `_live_system_guard`; refusal semantics unchanged | `29ae6a2b3c` | probe floor 28 ms → ~8 ms/test fresh (with Stage 2); guard tests identical result set (2 pre-existing win32 termios/pty fails, proven baseline) |
+| 2 — aging floor | O(1) counter `tmp_path` override + credential regex; attribution: real `make_numbered_dir` 2.69→23.94 ms/call, 150.8 s per 11 k calls | `29ae6a2b3c` | aged probe 77 ms → 36 ms mean; setup phase 410→150 s (agent_runtime), 326→186 s (hermes_cli). Residual aging (36 vs 8 ms) attributed §15 (not GC — the identity guard's `hasattr` walk) and CURED 2026-09-02, §16a + §Follow-ups |
+| 3 — parallel lane verified | no code; two full-lane passes from a worktree | — | 12,492/0 in 18:16 and 12,494/0 in 17:36 (8 workers); integrity byte-identical both times. **R3 RULED: default** (2026-09-01, delegated review — §14; AGENTS.md §Testing amended, `run_tests.sh` forwards `HERMES_TEST_TMP_ROOT`) |
+| 4 — worker sweep | no code; 12-worker probe | — | REJECTED: 23:55, 2 load-flaked fails (serially green). 8 workers stands |
+| 5 — gate parse sharing | `_tree_index` + 9 gate ports + module-teardown cache lifetime (785 MB retention lesson) | `29ae6a2b3c` + `adb17621db` | 9-file set 125.9→70.5 s same-command; 9 sabotage round-trips red-for-the-right-reason |
+| 6 — CLI children in-process | `_harness_cli.run_harness_in_process` over production `dispatch_argv`; realm_sync + office_class_key helpers swapped | `29ae6a2b3c` | **R5 RULED: upheld, no strikes** (2026-09-01, delegated review — field notes §12; every site claims verb wiring, none the process boundary; one-helper revert stays available). realm_sync 82.5→23.7 s, office 18.8→2.8 s; seam sabotage proves non-vacuity |
+| 7 — excluded tmp root | superseded by `hermes-agent-6b`'s TMP/TEMP/tempfile redirect landed on main; my basetemp variant dropped on rebase | `98d43d0c86` (theirs) | churn 0.25 s excluded vs 0.76 s `%TEMP%`; merged design verified (their 12 tests + probe under `X:\Eternia	est-tmp`) |
+
+Headline walls: serial `tests/agent_runtime` 21:27 → **16:39**, serial
+`tests/hermes_cli` 14:50 → **11:47** (identical result sets); parallel full
+lane (agent_runtime+hermes_cli+cli+state) **17:36, 0 failed, twice**.
+Full verification detail: field notes §§8–14.
+
+**R3 EXECUTED — the operator's own call, stamped 2026-09-01 (append-only;
+nothing above is rewritten).** The operator said *“set it parallel by
+default”* — the human hand R3's condition reserved, and the ruling was taken
+THROUGH that condition rather than around it. Two findings, both verifications
+rather than changes:
+
+1. **The gate was already satisfied, and by the runs this ledger already
+   carries.** R3's condition is parity + repo-integrity twice from a worktree;
+   Stage 3's row is exactly that — **12,492 passed / 0 failed in 18:16** and
+   **12,494 passed / 0 failed in 17:36**, both at 8 workers, both from a
+   throwaway worktree, with `git worktree list` / branch refs / reflog showing
+   only other sessions' additive landings and no ref reset, no `main` move, no
+   stray `%TEMP%\hermes-agent-wt` registration (field notes §14). **No suite
+   was re-run for this stamp**: a third pass adds no evidence the condition
+   asks for, and the full lane carries the updater tests that
+   `git branch -f main origin/main` while other sessions hold live worktrees.
+2. **The flip needed NO code change, because no entry point defaults to
+   serial.** `scripts/run_tests.sh` — the canonical runner AGENTS.md mandates
+   — has no serial branch to flip: it `exec`s `scripts/run_tests_parallel.py`
+   unconditionally, and has since long before this plan. What “default”
+   resolves to at runtime was re-checked on this box the same day: with no
+   `-j`/`--jobs` and no `HERMES_TEST_WORKERS`,
+   `_adaptive_default_jobs(os.cpu_count()=16)` returns **8** against the
+   `_DEFAULT_MAX_WORKERS = 8` cap — the blessed count, reached by default and
+   not by a flag. The documentation half is `dcbb5114cd` (AGENTS.md §Testing).
+   Serial stays reachable and stays documented as the exception: plain
+   `python -m pytest <file>` for single-file debugging, and the
+   `tests/integration` / `tests/e2e` / `tests/docker` lanes the runner
+   deliberately skips.
+
+Standing caveat, unchanged by this stamp: the ruled default's proven SCOPE is
+the 4-directory lane (agent_runtime + hermes_cli + cli + state), while the
+runner default-discovers the whole `tests` tree — the residual under
+§Follow-ups, rowed in the launcher's Mission Control queue.
+
+**Question this answers** (operator, 2026-09-01): *why is the suite slow on
+this machine — is it hangs?* — **No. There are no happy-path hangs** (§4: every
+≥10 s sleep literal is a kill-target child or a "never responds" thread stub;
+poll intervals are 0.01 s; the 20 s/180 s constants are failure ceilings under
+a 30 s pytest-timeout). The 32:37 is structural, and it decomposes cleanly:
+
+| # | cost | share of the measured lanes | evidence |
+|---|---|---|---|
+| 1 | **Serial, single-process execution** — plain `python -m pytest` uses 1 of 16 cores; the repo's own per-file parallel runner is not on the operator's path | the whole wall is exposed to it | §5, §7 |
+| 2 | **Per-test setup tax, and it AGES** — 28 ms/test autouse floor in a fresh process, **77 ms mean (max 670 ms) by the end of a 4.7 k-test process** (numbered tmp-dir scans degrade 0.46→5.8 ms/call as `basetemp` fills; the rest unattributed). Measured setup+teardown phases total **~13.4 min ≈ 41% of the 32:37** | ~13 min across the lanes | §2, §6, §6b-i |
+| 3 | — of which `_live_system_guard`'s per-test `psutil children(recursive=True)` walk alone | **10.9 ms/test ≈ 2.1 min** | §2 |
+| 4 | **Concentrated slow-test classes** — call time is top-heavy (top-400 rows = 72% of agent_runtime call time): (a) deliberate e2e serve boots ~117 s (untouchable); (b) whole-tree source-walk/AST gates **~190 s** re-walking the repo per test; (c) real `hermes_cli.main` CLI-child spawns where in-process seams exist (~100 s, `test_realm_sync.py` alone 82.5 s / 26 spawns) | ~5–7 min | §6 |
+| 5 | **Windows Defender** on every non-excluded path: 2.3× file-churn slowdown same-drive, 2.9× on `%TEMP%` — where every per-test `tmp_path`/hermetic home lives | multiplies items 2 and the runner's per-file overhead | §5 |
+| 6 | **Collection/import** — ~21 s per big directory serial; ~1.9 s/file (solo) to 4.2 s/file (8-way contended) interpreter+import+collect overhead on the parallel path | bounds the parallel win | §5, §6 |
+| 7 | Gateway fence — **exonerated**: 0.17 µs/test arming, 10 µs/spawn classify | nil | §5 |
+
+Ceiling check: the deliberate e2e/acceptance class plus genuinely-earned call
+time is on the order of 8–10 minutes serial; everything above that is overhead
+this plan attacks. The two independent levers compound: shaving the flat tax
+helps the serial lane ~7–8 min; the parallel lane divides whatever remains by
+an effective 3–6×.
+
+---
+
+## Non-goals
+
+- **No deleting or skipping tests.** Every test keeps running on the lane it
+  runs on today.
+- **No blanket timeout cuts.** `--timeout=30` and the 20 s/180 s failure
+  ceilings stay; they are hit only when something is already wrong.
+- **No converting deliberate real-serve acceptances to fakes.** The e2e files
+  (`test_gateway_peer_*_e2e.py`, `test_serve_socket_child_e2e.py`, the
+  serve-lane WAIT suites) prove process-boundary claims and are untouchable.
+- **No weakening the gateway fence** (measured cost is nanoscale; it defends a
+  measured live escape) **and no weakening the live-system guard's guarantee**
+  — Stage 1 moves its *cost*, never its refusal semantics.
+- **No system-settings changes by the implementer.** Defender configuration is
+  the operator's; this plan only carries a numbers-backed recommendation row.
+- **No xdist.** The repo already ruled it out (`scripts/run_tests_parallel.py`
+  docstring: persistent workers accumulate exactly the cross-file state the
+  per-file design exists to kill). The rulings table asks the operator to
+  close that question formally, not to reopen it.
+
+---
+
+## Stages (smallest first; each landable and testable on its own)
+
+### Stage 1 — take the psutil process-table walk off the per-test path
+
+**What:** in `tests/conftest.py::_live_system_guard`, stop calling
+`psutil.Process(pid).children(recursive=True)` eagerly at every test's setup.
+The snapshot only pre-approves children that existed *before* the test began —
+almost always the empty set — and `_is_own_subtree()` already holds the
+authoritative fallback (a live `psutil.Process(pid).parents()` walk at kill
+time). Options, in preference order: (a) drop the eager snapshot and rely on
+the live-walk fallback (it answers the same question, at kill time, when a
+kill actually happens — rare); (b) compute the snapshot lazily on first
+`os.kill` interception instead of at setup.
+
+**Measurement justifying it:** 10.9 ms/test, ~2.1 min/suite; the walk is
+`psutil_windows.ppid_map` scanning the whole process table 11,549 times (§2).
+
+**Acceptance:** overhead probe (200 no-op tests, §2 method) shows
+`_live_system_guard` setup ≤2 ms/test; `tests/test_live_system_guard.py` and
+`tests/test_live_system_guard_self_test.py` green; the CI flake the snapshot
+comment cites (`test_entire_tree_is_sigkilled_not_just_parent`) green ×10.
+
+**Risks:** a test whose child was spawned by a *fixture* before guard setup
+and killed by PID during the test would previously fast-path through the
+static set and now takes the live `parents()` walk — same verdict, slightly
+slower on that rare path. A behavior difference is only possible where psutil
+cannot resolve the process chain (already handled: unresolvable ⇒ stale-PID
+allow / foreign refuse, unchanged).
+
+### Stage 2 — attribute and cure the AGING floor (28 ms fresh → 77 ms aged)
+
+**What:** the biggest single number after parallelism. First task is the
+missing attribution: embed the 200-no-op probe at the START and END of a full
+`tests/hermes_cli` run and cProfile the aged tail in-situ (the §2 method, at
+the other end of the process), splitting the ~49 ms of growth between (a) the
+numbered tmp-dir scan (mechanism pinned: 0.46→5.8 ms/call as `basetemp`
+fills, §6b-i), (b) guards that activate once their target modules import,
+(c) anything else the profile names. Then fix what the profile convicts —
+candidate mechanics, in order of likely yield: give the suite a
+flat-namespace tmp strategy that doesn't rescan a filling directory
+(pytest's `tmp_path` factory pointed at per-N-hundred-test subdirectories,
+or a session-scoped counter that skips the scan); the Stage-1-style shaves
+of `_hermetic_environment` (4.4 ms fresh: full-`os.environ` scan + 6
+Defender-taxed `mkdir`s) and `_ensure_current_event_loop` (1.7 ms).
+
+**Measurement justifying it:** §6b-i — no-op setup 77 ms mean / 670 ms max at
+end-of-process vs 28 ms fresh; setup+teardown phases sum to ~13.4 min ≈ 41%
+of the operator's 32:37. Even halving the aged floor returns ~5–6 min serial.
+
+**Acceptance:** the start/end probe pair shows end-of-process setup within
+1.5× of start-of-process; full `tests/hermes_cli` serial wall drops
+accordingly with an identical pass/skip/xfail set to the §6b baseline
+(4,623/100/1); the invariants at the top of `tests/conftest.py` still hold
+(guard self-tests + `test_log_isolation.py` green).
+
+**Risks:** low-to-medium — mechanical rewrites inside fixtures whose behavior
+is pinned by existing tests, but tmp-dir strategy touches every test's
+`tmp_path`; keep pytest's per-test-unique, auto-cleaned contract exactly.
+The one semantic trap: the env sweep must keep scanning live `os.environ`
+(credential vars set mid-session by leaky tests are its point) — cheaper,
+never a session-start snapshot. Note the interaction with Stage 3: per-file
+processes never age, so the parallel lane sidesteps most of this cost
+structurally — Stage 2 is what keeps the SERIAL lane honest.
+
+### Stage 3 — make the in-repo parallel runner the operator's full-suite lane
+
+**What:** no new machinery — validate and document
+`scripts/run_tests_parallel.py` (per-file subprocess isolation, 8 workers,
+duration-balanced via its own `test_durations.json` cache) as the way this
+machine runs "the full suite", replacing serial `python -m pytest <dirs>`.
+The stage's work is the **safety re-verification**, because the July
+precedent is disqualifying until re-measured: a 2026-07-26 full parallel run
+produced ~338 spurious failures and destroyed a detached worktree, and a
+2026-08-01 serial-but-unfenced run moved `main` via the updater tests. The
+2026-08-31 gateway fence and the dcw-h2 test-isolation lane postdate all of
+that; whether they closed it is a claim to prove, not assume.
+
+**Measurement justifying it:** §5 — 82.8 s vs 131.0 s (1.58×) on the
+smallest, worst-case scope (102 files); the ratio improves with scale as
+per-file overhead amortizes and the duration cache balances shards. Serial
+32:37 with 15 idle cores is the single largest number in the diagnosis.
+Bonus that the small-scope measurement understates: per-file processes never
+age, so the lane also sidesteps the §6b-i aging floor (77 ms → 28 ms per
+test) structurally.
+
+**Acceptance:** (1) parallel full-lane run (agent_runtime + hermes_cli + cli
++ state + integration) from a throwaway worktree has a failure set identical
+to the serial baseline (expected: empty); (2) `git worktree list`,
+`git branch -v` and the reflog on the primary repo are byte-identical before
+and after; (3) no orphan `%TEMP%\hermes-agent-wt` registrations appear;
+(4) wall time and per-file stats recorded in the field notes.
+
+**Risks:** the July failure classes resurface — then the stage's deliverable
+is the *list of offending files* (each is a real isolation bug by the repo's
+own standards, filed as queue rows), not a forced landing. Run only from a
+worktree until (2) has passed twice.
+
+### Stage 4 — tune the parallel lane's throughput
+
+**What:** with Stage 3's parity gate green, sweep the knobs the runner
+already exposes: `HERMES_TEST_WORKERS` 8 → 12 → 16 (16 logical cores;
+default caps at 8), and measure per-child pytest boot trims
+(`-p no:cacheprovider`, `PYTEST_DISABLE_PLUGIN_AUTOLOAD` with an explicit
+`-p` list) against the measured 1.9 s solo / 4.2 s contended per-file
+overhead across ~990 files.
+
+**Measurement justifying it:** §5 — per-file overhead totals 542.8 s CPU-wall
+on a 102-file scope whose serial test time was ~118 s; overhead, not test
+time, dominates the parallel lane's cost today.
+
+**Acceptance:** identical pass/fail set at every setting; the
+wall-vs-workers curve and chosen default recorded in the field notes; runner
+default updated only if the win is ≥15% and stable across two runs.
+
+**Risks:** >8 workers deepens Defender/CPU contention (the 4.2 s number IS
+that contention) — the sweep may conclude 8 is right; that is a valid
+outcome. Disabling plugin autoload must keep `pytest-asyncio`/`pytest-timeout`
+explicitly listed or every file fails on the addopts `--timeout` flag.
+
+### Stage 5 — one walk for the source-walk gate class
+
+**What:** the ~190 s class (§6: S27/S29/S46/S49/S50/S56 removal gates,
+`test_stream_stale_first_routing`, `test_office_class_key_guard`,
+`test_persona_roster_bypass_contract`, `test_tombstone_registry`'s per-test
+`git` subprocesses, `test_hermes_home_env_gate`'s 9.2 s setup) re-parses the
+same unchanged tree once per test. Provide ONE session-scoped fixture owning
+the expensive raw material — a parsed-AST index over `git ls-files` output —
+and port gate tests to consume it; their assertions stay untouched. Under the
+per-file parallel runner the cache warms once per file, which is exactly the
+sharing that exists today, minus the intra-file duplication.
+
+**Measurement justifying it:** §6 class total ~190 s in agent_runtime alone;
+`test_tombstone_registry.py` 65.1 s / 22 tests and
+`test_stream_stale_first_routing.py` 26.2 s are single-file stragglers that
+also stretch the parallel lane's critical path.
+
+**Acceptance:** every ported gate still REDDENS on a planted violation
+(sabotage round-trip per the house rule: apply the mutation, watch red,
+revert, watch green — one planted case per ported file); class total drops
+≥60% on the §6 re-measurement; no gate's enumeration source changes (the
+fixture feeds it the same `git ls-files`/AST facts it derived itself).
+
+**Risks:** the vault's gate rulings are strict ("enumerate from the thing
+itself"; a walk that cannot see a `part`-equivalent is not an enumeration) —
+the fixture must be a *materialization* of the same enumeration, not a second
+authority; where a gate's walk differs (tombstone's git-history reads), it
+keeps its own. This is why the stage is gated on a ruling row below.
+
+### Stage 6 — reclassify CLI-child spawns that stand in for unit seams
+
+**What:** audit the ~10 agent_runtime files using the
+`_run_harness`-style pattern (real `python -m hermes_cli.main harness …`
+child per assertion; §6 class 3), plus the same-shaped hermes_cli sinks the
+§6b run ranked (`test_harness_characters_cli.py` 67.3 s,
+`test_doctor.py` 57.8 s, `test_completion.py`'s 14.1 s bash-syntax spawn). For each call site, classify: (a) the claim
+is process-boundary (exit code, argv parsing at the real entry, env
+inheritance) → stays a real child; (b) the claim is handler wiring/output
+shape → drive the parser+handler in-process, as the live-system guard's own
+refusal message already instructs. Convert only class (b).
+
+**Measurement justifying it:** `test_realm_sync.py` 82.5 s ≈ 26 spawns ×
+~3 s; two spawns in one test cost 20.4 s under contention (§6). Warm
+in-process equivalent is milliseconds.
+
+**Acceptance:** per-file classification table lands in the field notes
+BEFORE any conversion; converted tests red on the same planted defects as
+before (sabotage round-trip); `test_realm_sync.py` wall drops ≥50%; every
+call site classified (a) is left byte-identical.
+
+**Risks:** misclassifying an acceptance as wiring — mitigated by the
+table-first mechanic and the ruling row; the operator strikes any row they
+consider a deliberate acceptance before conversion starts.
+
+### Stage 7 — recommendation only: a Defender-excluded test-temp root
+
+**What:** no code change lands without the ruling. If the operator adds a
+real-time-scan exclusion for a dedicated, test-only directory (e.g.
+`X:\test-tmp` — NEVER inside `X:\Eternia\.hermes`, which is the live store),
+wire pytest's `--basetemp`/`TMP` for test runs at that root via an opt-in
+documented in the runner, so every per-test `tmp_path` and hermetic
+HERMES_HOME escapes the measured 2.3–2.9× Defender file-op tax.
+
+**Measurement justifying it:** §5 churn table (0.32 s excluded vs 0.73 s
+same-drive non-excluded vs 0.92 s `%TEMP%`); §2 (tmp_path + hermetic mkdirs
+are per-test); the per-file runner's children also pay it on every import.
+
+**Acceptance (post-ruling):** §5 churn benchmark re-run inside the new root
+shows the excluded-class number; overhead probe and one full directory run
+quantify the realized win; a misconfigured/missing exclusion degrades to
+today's behavior, never to an error.
+
+**Risks:** an exclusion root that overlaps anything non-test weakens the
+machine's defense — the recommendation is a *dedicated* directory used by
+nothing else; the operator owns the trade.
+
+---
+
+## Rulings needed (operator decisions — none pre-empted by this plan)
+
+**ALL SIX RULED 2026-09-01 at the recommendation (operator: "do the
+recommended"), with ONE amendment to R2:** the operator has `X:\Eternia\`
+excluded already (confirmed in-session), so NO new Defender exclusion is
+needed — Stage 7's temp root is `X:\Eternia\test-tmp` (created), inside the
+existing exclusion, and the ruling's "operator-only system setting" clause is
+DISCHARGED as not-needed. R3's condition stands as ruled: the parallel lane
+becomes the documented default only after parity + repo-integrity gates pass
+twice from a worktree — **condition met and R3 CLOSED as "default" on
+2026-09-01 by delegated fresh-context review** (field notes §14; 12 workers
+rejected on both wall and stability). **R5's strike pass is CLOSED the same
+day by the same review: all 37 converted sites upheld, zero struck** (field
+notes §12 carries the reasoning). R6 stays not-now.
+**Execution order (operator, same exchange): "only to the exclusion now" —
+Stage 7 builds immediately; every other stage HOLDS for the operator's go.**
+
+| # | question | trade | plan's recommendation, with numbers |
+|---|---|---|---|
+| R1 | **pytest-xdist**: adopt for parallelism? | speed vs the per-file isolation design (persistent xdist workers carry cross-file module state; the runner docstring records dropping it for exactly that) | **No.** The serve one-owner locks would NOT forbid it (per-root, §5) and the fence arms per-test — the objection is state leakage by design, not locks. The in-repo per-file runner is the sanctioned lane (Stage 3); formalize that and close the question. |
+| R2 | **Defender exclusion** for a dedicated test-temp root (system setting — operator-only) | scan coverage on one throwaway directory vs a 2.3–2.9× tax on every test file-op (§5 churn table) | Recommend: create `X:\test-tmp`, exclude it, land Stage 7's opt-in wiring. Bounded win: minutes across serial and parallel lanes; zero effect on non-test paths. |
+| R3 | **Parallel lane as the documented default** for full-suite runs on this machine | July 2026 precedent (338 spurious failures, destroyed worktree) vs 15 idle cores | **RULED: default** (2026-09-01, delegated review). Condition met — parity + integrity passed twice at 8 workers (§14). Serial pytest is the exception (single-file debugging; integration/e2e/docker lanes). 12 workers rejected. Doc: AGENTS.md §Testing. |
+| R4 | **Source-walk gate caching** (Stage 5): may gate tests consume a shared session-scoped materialization of the same walk? | per-test independent enumeration vs ~190 s/run; vault ruling "enumerate from the thing itself" must not be diluted into a second authority | Allow, with the sabotage round-trip acceptance per ported file; gates whose walk is genuinely distinct (git-history reads) keep their own. |
+| R5 | **CLI-child conversion list** (Stage 6): which `_run_harness`-class call sites are deliberate process-boundary acceptances? | test fidelity vs ~100 s/run | **RULED: upheld, no strikes** (2026-09-01, delegated review). All 37 sites claim verb wiring (envelope/exit/store), none the process boundary; the three class-(a) files stay byte-identical children. §12 carries the per-site reasoning. |
+| R6 | **Batching multiple small files per runner child** (possible Stage 4 extension): weaken per-FILE isolation to per-BATCH to amortize the 1.9–4.2 s/file overhead? | isolation granularity (the repo's chosen boundary) vs the single biggest parallel-lane cost | **Not recommended now** — take Stages 3–4 first and re-measure; only bring this back with data showing the remaining overhead still dominates. |
+
+## Follow-ups this diagnosis surfaced (not perf, filed here for routing)
+
+- **`[RESIDUAL 2026-09-01, post-R3]` The ruled default's SCOPE is wider than its
+  proof.** R3's parity/integrity evidence is the 4-directory lane
+  (agent_runtime + hermes_cli + cli + state), but `scripts/run_tests_parallel.py`
+  default-discovers the WHOLE `tests` tree (`_DEFAULT_ROOTS = ['tests']`, minus
+  the integration/e2e skips). A whole-tree invocation on a green `main`
+  (`de710d0b89`, 2026-09-01, normal Windows operator environment) read
+  **31,063 passed / 142 failed — all 142 triaged environmental or pre-existing**
+  (provider-network hangs, WSL-bash PATH shadow, acp/ripgrep dependency holes,
+  2 run_agent reds verified red at baseline `98d43d0c86`, 1 load-flake green in
+  isolation), which an operator will misread as a red `main`. The validated gate
+  remains the 4-dir parallel lane per the EXECUTED ledger; the scope question is
+  rowed in the launcher Mission Control queue as a rider on the R3 ruling.
+- `tests/acp/*` collection failure in worktrees (`No module named 'acp'`) is
+  known/pre-existing (editable install resolves to the primary) — any Stage 3
+  worktree lane needs the same `--ignore`/install answer CI uses.
+- 3 further collection errors exist in fringe dirs under a full-tree
+  `pytest tests/ --collect-only` (§6c) — outside the operator's lanes, noted
+  for whoever owns those dirs.
+- **`[LANDED 2026-09-02, <sha>]` The residual aging §15 attributed is cured.**
+  Stage 2's ledger row left "Residual aging (36 vs 8 ms) OPEN"; §15 then pinned
+  ~65% of it on the SETUP half of
+  `tests/hermes_cli/conftest.py::_sys_modules_identity_is_restored` and wrote a
+  decision-ready fix. Landed as written:
+  `tests/hermes_cli/_module_identity.py::ParentBindingRepair` keeps the identity
+  guarantee (the before-copy and the teardown restore are untouched) and retires
+  the per-test O(`sys.modules`) module-object work — `child in vars(parent)`
+  instead of `hasattr`, and the walk gated on `len(sys.modules)` having changed.
+  Both pollution classes the guard's docstring names were re-run in one process
+  in the order that reproduces them, with the counterfactual. Measured at
+  2,957 modules, bracketed both ways under load: **~5.3 ms/test off the
+  fixture's setup**, and the guard's own per-call cost 3.479 ms -> 0.003 ms.
+  **OWED:** a whole-run aged AFTER on the §15 probe method — two attempts were
+  lost (one to a task kill at 93%, one to the box saturating at 100% CPU), so
+  the floor's own after-number is not measured. Numbers, guarantee proofs and
+  the red-first result set: field notes §16a.
+- **`[LANDED 2026-09-02, <sha>]` `doctor.HERMES_HOME` reads at call time — and
+  the row's stated CONSEQUENCE was wrong.** `run_doctor` now resolves the home,
+  and the `.env` it loads, when it runs; `hermes_cli/doctor.py`'s entry in
+  `tests/test_no_frozen_hermes_home.py` shrinks to the display label alone. But
+  the `agent-browser.CMD --version` spawn the gateway fence exempts does NOT
+  come from that binding — it comes from `shutil.which("agent-browser")` on the
+  operator's PATH, which `run_tests.sh` forwards verbatim. Deleting the
+  exemption still reds 19 tests in `test_doctor.py` with the binding fixed, so
+  it was NARROWED to the probe itself instead of deleted. Field notes §16b.
+- **`[RESIDUAL 2026-09-02]` The gateway fence's real-store arm is inert under
+  `run_tests.sh`.** `_real_hermes_root()` reads `get_default_hermes_root()`,
+  which is env-derived, and `run_tests.sh` runs `env -i` without `HERMES_HOME` —
+  so by the time the fence computes `_REAL_ROOT`, `tests/conftest.py` has
+  already put a session temp home in the env, and that temp dir becomes
+  "the operator's real store". Measured: `classify()` of the live
+  `profiles/alice` agent-browser CMD returns `None` under the sanctioned runner.
+  The arm defends the real store only on the bare-`pytest` path. Not fixable
+  inside the fence — under `env -i` this box's actual store root
+  (`X:\Eternia\.hermes`, a custom deployment) is not knowable from the
+  environment the runner hands the process. Field notes §16c.
+- **`[RESIDUAL 2026-09-02]` The last agent-browser spawn is a TEST-side seam.**
+  `agent_browser_runnable`'s per-path memoisation already cut it to one per
+  process; killing it means stubbing doctor's real browser resolver for the
+  tests that only want doctor's report. Production is entitled to consult PATH.

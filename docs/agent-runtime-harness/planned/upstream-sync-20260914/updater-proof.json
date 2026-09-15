@@ -1,0 +1,48 @@
+{
+  "candidate": "5272404b844ec990871c421d55cd8bc83628987f",
+  "pr": "https://github.com/nekwo/hermes-agent/pull/1",
+  "runs": [
+    {
+      "log": "updater-history-first.log",
+      "sha256": "32e1916bb8400ec40fbfaa77990e58c421b9ccf37439cb0bfbcc9b22ae18b29b",
+      "summary": [
+        "=== Summary: 3 files, 50 tests passed, 1 failed, 1 skipped (100% complete) in 85.3s (3 workers) ==="
+      ]
+    },
+    {
+      "log": "updater-desktop-history.log",
+      "sha256": "613ba32db19c56ef13c2df42b9629bff9ea660175b023630df913ee3ea7719c1",
+      "summary": [
+        "=== Summary: 4 files, 17 tests passed, 0 failed (100% complete) in 17.1s (4 workers) ==="
+      ]
+    },
+    {
+      "log": "updater-history-regression.log",
+      "sha256": "3a5c26f5cc26d9ca441b48d61137eeac36bc323861701c0cfbf01f2832ad2525",
+      "summary": [
+        "=== Summary: 4 files, 51 tests passed, 0 failed, 48 skipped (100% complete) in 70.0s (4 workers) ==="
+      ]
+    },
+    {
+      "log": "launcher-local-llama-sync-qa.log",
+      "sha256": "6b129d6d3de4bd9689d18e74ce6ab2d2fd5ba4051a5ead230c5f98f045a3cc7c",
+      "summary": [
+        "Error: Failed to build asset bundle"
+      ]
+    },
+    {
+      "log": "launcher-local-llama-sync-qa-ready.log",
+      "sha256": "9edb8c28970a582f88f80e6f3529909411dbb9c321566ee13605ce064a54b41f",
+      "summary": [
+        "00:01 +17: All tests passed!"
+      ]
+    }
+  ],
+  "syntax_checks": [
+    "PowerShell parser windows.ps1: zero errors",
+    "bash -n scripts/desktop-update/posix.sh: exit 0",
+    "five runner workflow YAML files parsed"
+  ],
+  "ci_status": "Running as of checkpoint; do not infer pass",
+  "main_updated": false
+}
