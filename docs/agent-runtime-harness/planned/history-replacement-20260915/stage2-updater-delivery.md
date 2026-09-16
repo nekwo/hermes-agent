@@ -37,3 +37,16 @@ button; the available job log does not identify the precise failed assertion.
 Both test and component are byte-identical to the pinned upstream baseline.
 No change is made to these files under the identical-tracked-tree requirement.
 This is an explicit remaining gap, not a claim that all frozen-source CI is green.
+
+## First-publication readiness correction
+
+The backend download endpoint returned 503 manifest_unavailable. Read-only
+object metadata checks found no launcher objects in its configured bucket;
+access to the bucket works. This is a first publication. The active release
+run is https://github.com/ArcadiaLabsLLC/EterniaLauncher/actions/runs/35038700512
+with stable channel and explicit min_supported=0.0.0 (no mandatory-update floor).
+Earlier build-only attempts were cancelled before publication to load the newly
+configured signing secret and supply the required first-publication input.
+GitHub reads repository secrets when a run is queued. The local service
+configuration and running applications were unchanged. Public signed-manifest
+availability remains the promotion gate.
