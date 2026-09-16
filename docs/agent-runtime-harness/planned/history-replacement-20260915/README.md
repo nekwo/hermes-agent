@@ -99,5 +99,7 @@ full runtime suite.
 
 ## Current stage
 
-Candidate and archive are pushed. Main has not yet been replaced. Launcher
-migration code and additional regression checks are being completed separately.
+Complete: Hermes local and remote main now name the 15-commit replacement.
+The operator explicitly removed the Launcher distribution dependency; updater
+source is on Launcher main, with no binary distribution. See final-delivery.md
+for final SHAs, tests, recovery refs, remaining gaps and installer handoff.
